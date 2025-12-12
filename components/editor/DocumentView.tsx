@@ -1,14 +1,32 @@
 'use client'
 
-import { Share2, Download, Edit } from 'lucide-react'
+import { Share2, Download, Edit, Plus } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import StepEditor, { VideoStep } from './StepEditor'
 
 interface DocumentViewProps {
-  content: string
+  content?: string
   title: string
+  steps?: VideoStep[]
+  onStepUpdate?: (id: string, updates: Partial<VideoStep>) => void
+  onStepDelete?: (id: string) => void
+  onStepRecapture?: (id: string) => void
+  onScreenshotClick?: (timestamp: number) => void
+  onAddStep?: () => void
+  capturingStepIds?: string[]
 }
 
-export default function DocumentView({ content, title }: DocumentViewProps) {
+export default function DocumentView({
+  content,
+  title,
+  steps,
+  onStepUpdate,
+  onStepDelete,
+  onStepRecapture,
+  onScreenshotClick,
+  onAddStep,
+  capturingStepIds = [],
+}: DocumentViewProps) {
   // Enhanced markdown-like rendering
   const renderContent = (text: string) => {
     if (!text.trim()) {
@@ -171,6 +189,40 @@ export default function DocumentView({ content, title }: DocumentViewProps) {
     document.body.removeChild(a)
   }
 
+  // Render steps timeline if steps are provided
+  if (steps && steps.length > 0) {
+    return (
+      <div className="flex-1 overflow-y-auto bg-white">
+        <div className="max-w-3xl mx-auto py-12 px-16">
+          {/* Header */}
+          <div className="mb-8">
+            <h1 className="text-4xl font-normal mb-2">{title}</h1>
+            <p className="text-sm text-muted-foreground">
+              {steps.length} step{steps.length !== 1 ? 's' : ''}
+            </p>
+          </div>
+
+          {/* Steps Timeline */}
+          <div className="space-y-8">
+            {steps.map((step, index) => (
+              <StepEditor
+                key={step.id}
+                step={step}
+                stepNumber={index + 1}
+                onUpdate={onStepUpdate || (() => {})}
+                onDelete={onStepDelete || (() => {})}
+                onRecapture={onStepRecapture || (() => {})}
+                onScreenshotClick={onScreenshotClick || (() => {})}
+                isCapturing={capturingStepIds.includes(step.id)}
+              />
+            ))}
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  // Fallback to content rendering if no steps
   return (
     <div className="flex-1 overflow-y-auto bg-background">
       <div className="max-w-4xl mx-auto p-8">
@@ -195,7 +247,7 @@ export default function DocumentView({ content, title }: DocumentViewProps) {
 
         {/* Content */}
         <div className="prose prose-slate max-w-none">
-          {renderContent(content)}
+          {renderContent(content || '')}
         </div>
       </div>
     </div>

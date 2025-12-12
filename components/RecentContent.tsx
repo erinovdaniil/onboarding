@@ -25,6 +25,27 @@ export default function RecentContent() {
     fetchProjects()
   }, [])
 
+  // Auto-refresh when page becomes visible
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (!document.hidden) {
+        fetchProjects()
+      }
+    }
+
+    const handleFocus = () => {
+      fetchProjects()
+    }
+
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+    window.addEventListener('focus', handleFocus)
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+      window.removeEventListener('focus', handleFocus)
+    }
+  }, [])
+
   const fetchProjects = async () => {
     try {
       const response = await fetch('/api/projects')

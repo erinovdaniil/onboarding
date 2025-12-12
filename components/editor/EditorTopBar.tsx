@@ -54,12 +54,12 @@ export default function EditorTopBar({
         <Button variant="ghost" size="icon" className="h-8 w-8">
           <MoreVertical className="w-4 h-4" />
         </Button>
-        <Button 
+        <Button
           className="bg-primary hover:bg-primary/90 text-primary-foreground gap-2"
           onClick={onExport}
         >
           <Rocket className="w-4 h-4" />
-          Export Video
+          {activeTab === 'document' ? 'Export Document' : 'Export Video'}
         </Button>
       </div>
     </div>

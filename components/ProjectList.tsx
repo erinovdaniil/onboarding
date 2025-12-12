@@ -21,6 +21,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
+import { authenticatedFetch } from '@/lib/api'
 
 interface ProjectListProps {
   onSelectProject: (project: any) => void
@@ -37,11 +38,45 @@ export default function ProjectList({ onSelectProject, searchQuery = '' }: Proje
     fetchProjects()
   }, [])
 
+  // Auto-refresh when page becomes visible
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (!document.hidden) {
+        fetchProjects()
+      }
+    }
+
+    const handleFocus = () => {
+      fetchProjects()
+    }
+
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+    window.addEventListener('focus', handleFocus)
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+      window.removeEventListener('focus', handleFocus)
+    }
+  }, [])
+
   const fetchProjects = async () => {
     try {
-      const response = await fetch('/api/projects')
+      const response = await authenticatedFetch('/api/projects')
       const data = await response.json()
-      setProjects(data.projects || [])
+
+      // Create placeholder project
+      const placeholderProject = {
+        id: 'placeholder-1',
+        name: 'Sample Video',
+        createdAt: new Date().toISOString(),
+        thumbnailUrl: null,
+        videoUrl: null,
+        language: 'English',
+        script: '',
+      }
+
+      // Inject placeholder at the beginning of the projects array
+      setProjects([placeholderProject, ...(data.projects || [])])
     } catch (error) {
       console.error('Error fetching projects:', error)
     } finally {
@@ -77,7 +112,7 @@ export default function ProjectList({ onSelectProject, searchQuery = '' }: Proje
     if (!projectToDelete) return
 
     try {
-      await fetch(`/api/projects/${projectToDelete}`, {
+      await authenticatedFetch(`/api/projects/${projectToDelete}`, {
         method: 'DELETE',
       })
       fetchProjects()
@@ -133,30 +168,32 @@ export default function ProjectList({ onSelectProject, searchQuery = '' }: Proje
                   <span className="text-4xl">📹</span>
                 </div>
               )}
-              {/* Three-dot menu overlay */}
-              <div className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <Button
-                      variant="secondary"
-                      size="icon"
-                      className="h-8 w-8 bg-background/80 backdrop-blur-sm"
-                      onClick={(e) => e.stopPropagation()}
-                    >
-                      <MoreVertical className="w-4 h-4" />
-                    </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end">
-                    <DropdownMenuItem
-                      onClick={(e) => handleDeleteClick(project.id, e)}
-                      className="text-destructive"
-                    >
-                      <Trash2 className="w-4 h-4 mr-2" />
-                      Delete
-                    </DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
-              </div>
+              {/* Three-dot menu overlay (hidden for placeholder projects) */}
+              {!project.id.startsWith('placeholder-') && (
+                <div className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button
+                        variant="secondary"
+                        size="icon"
+                        className="h-8 w-8 bg-background/80 backdrop-blur-sm"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <MoreVertical className="w-4 h-4" />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end">
+                      <DropdownMenuItem
+                        onClick={(e) => handleDeleteClick(project.id, e)}
+                        className="text-destructive"
+                      >
+                        <Trash2 className="w-4 h-4 mr-2" />
+                        Delete
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                </div>
+              )}
             </div>
             
             {/* Content Info */}

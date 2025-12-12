@@ -1,56 +1,52 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Header
 from pathlib import Path
 import os
-from typing import List, Dict, Any
+import json
+from typing import List, Dict, Any, Optional
+
+from app.database import (
+    list_projects as db_list_projects,
+    get_project as db_get_project,
+    delete_project as db_delete_project,
+    get_transcript,
+    get_video_files
+)
+from app.storage import delete_file_from_storage
+from app.auth import optional_auth
 
 router = APIRouter()
 
-# Get upload directory
-UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "../public/uploads"))
+# Supabase Storage bucket name
+STORAGE_BUCKET = os.getenv("SUPABASE_STORAGE_BUCKET", "videos")
 
 
 @router.get("/")
-async def list_projects():
+async def list_projects(authorization: Optional[str] = Header(None)):
     """
     List all video projects.
+    Optionally filtered by user if authorization header is provided.
     """
     try:
-        if not UPLOAD_DIR.exists():
-            return {"projects": []}
+        # Extract user_id from JWT token if provided
+        user_id = optional_auth(authorization)
 
-        projects: List[Dict[str, Any]] = []
+        # Get projects from database
+        projects = await db_list_projects(user_id=user_id)
 
-        # Iterate through project directories
-        for project_dir in UPLOAD_DIR.iterdir():
-            if project_dir.is_dir():
-                project_id = project_dir.name
-                original_video_path = project_dir / "original.webm"
-                processed_video_path = project_dir / "processed.mp4"
-
-                # Get creation time
-                from datetime import datetime
-                stat = original_video_path.stat() if original_video_path.exists() else project_dir.stat()
-                created_at = datetime.fromtimestamp(stat.st_mtime).isoformat()
-
-                projects.append({
-                    "id": project_id,
-                    "name": f"Project {project_id[:8]}",
-                    "videoUrl": (
-                        f"/uploads/{project_id}/original.webm"
-                        if original_video_path.exists()
-                        else None
-                    ),
-                    "processedVideoUrl": (
-                        f"/uploads/{project_id}/processed.mp4"
-                        if processed_video_path.exists()
-                        else None
-                    ),
-                    "status": "processed" if processed_video_path.exists() else "uploaded",
-                    "createdAt": created_at,
-                })
-
-        # Sort by creation date, newest first
-        projects.sort(key=lambda x: x["createdAt"], reverse=True)
+        # Get video files for each project to populate URLs
+        from app.storage import get_file_url
+        for project in projects:
+            video_files = await get_video_files(project["id"])
+            
+            # Find original and processed video URLs
+            for video_file in video_files:
+                storage_path = video_file.get("storage_path")
+                if storage_path:
+                    file_url = await get_file_url(STORAGE_BUCKET, storage_path, public=True)
+                    if video_file["file_type"] == "original":
+                        project["videoUrl"] = file_url or project.get("video_url")
+                    elif video_file["file_type"] == "processed":
+                        project["processedVideoUrl"] = file_url
 
         return {"projects": projects}
 
@@ -62,40 +58,42 @@ async def list_projects():
 
 
 @router.get("/{project_id}")
-async def get_project(project_id: str):
+async def get_project(project_id: str, authorization: Optional[str] = Header(None)):
     """
     Get a single project by ID.
     """
     try:
-        project_dir = UPLOAD_DIR / project_id
+        # Extract user_id from JWT token if provided
+        user_id = optional_auth(authorization)
+
+        # Get project from database
+        project = await db_get_project(project_id, user_id=user_id)
         
-        if not project_dir.exists() or not project_dir.is_dir():
+        if not project:
             raise HTTPException(status_code=404, detail="Project not found")
+
+        # Get video files
+        video_files = await get_video_files(project_id)
         
-        original_video_path = project_dir / "original.webm"
-        processed_video_path = project_dir / "processed.mp4"
-        
-        # Get creation time
-        from datetime import datetime
-        stat = original_video_path.stat() if original_video_path.exists() else project_dir.stat()
-        created_at = datetime.fromtimestamp(stat.st_mtime).isoformat()
-        
-        project = {
-            "id": project_id,
-            "name": f"Project {project_id[:8]}",
-            "videoUrl": (
-                f"/uploads/{project_id}/original.webm"
-                if original_video_path.exists()
-                else None
-            ),
-            "processedVideoUrl": (
-                f"/uploads/{project_id}/processed.mp4"
-                if processed_video_path.exists()
-                else None
-            ),
-            "status": "processed" if processed_video_path.exists() else "uploaded",
-            "createdAt": created_at,
-        }
+        # Populate video URLs from storage
+        from app.storage import get_file_url
+        for video_file in video_files:
+            storage_path = video_file.get("storage_path")
+            if storage_path:
+                file_url = await get_file_url(STORAGE_BUCKET, storage_path, public=True)
+                if video_file["file_type"] == "original":
+                    project["videoUrl"] = file_url or project.get("video_url")
+                elif video_file["file_type"] == "processed":
+                    project["processedVideoUrl"] = file_url
+
+        # Get transcript
+        transcript_record = await get_transcript(project_id)
+        if transcript_record:
+            project["transcript"] = {
+                "text": transcript_record.get("text", ""),
+                "language": transcript_record.get("language", "en"),
+                "segments": transcript_record.get("segments", [])
+            }
         
         return project
         
@@ -109,19 +107,33 @@ async def get_project(project_id: str):
 
 
 @router.delete("/{project_id}")
-async def delete_project(project_id: str):
+async def delete_project(project_id: str, authorization: Optional[str] = Header(None)):
     """
-    Delete a project and all its files.
+    Delete a project and all its files from database and storage.
     """
     try:
-        project_dir = UPLOAD_DIR / project_id
+        # Extract user_id from JWT token if provided
+        user_id = optional_auth(authorization)
 
-        if not project_dir.exists():
+        # Get project to verify it exists
+        project = await db_get_project(project_id, user_id=user_id)
+        if not project:
             raise HTTPException(status_code=404, detail="Project not found")
 
-        # Delete the entire project directory
-        import shutil
-        shutil.rmtree(project_dir)
+        # Get all video files for this project
+        video_files = await get_video_files(project_id)
+        
+        # Delete files from Supabase Storage
+        for video_file in video_files:
+            storage_path = video_file.get("storage_path")
+            if storage_path:
+                await delete_file_from_storage(STORAGE_BUCKET, storage_path)
+
+        # Delete project from database (cascades to transcripts and video_files)
+        success = await db_delete_project(project_id, user_id=user_id)
+        
+        if not success:
+            raise HTTPException(status_code=500, detail="Failed to delete project")
 
         return {"success": True}
 

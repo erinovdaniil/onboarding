@@ -5,10 +5,19 @@ const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:8000'
 export async function POST(request: NextRequest) {
   try {
     const formData = await request.formData()
-    
-    // Forward the request to Python backend
+
+    // Get authorization header from request
+    const authorization = request.headers.get('authorization')
+
+    // Forward the request to Python backend with auth header
+    const headers: HeadersInit = {}
+    if (authorization) {
+      headers['Authorization'] = authorization
+    }
+
     const response = await fetch(`${BACKEND_URL}/api/upload/`, {
       method: 'POST',
+      headers,
       body: formData,
     })
 

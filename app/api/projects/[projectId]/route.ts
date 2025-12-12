@@ -8,10 +8,12 @@ export async function GET(
 ) {
   try {
     const { projectId } = params
-    
+    const authorization = request.headers.get('authorization')
+
     // Forward the request to Python backend
     const response = await fetch(`${BACKEND_URL}/api/projects/${projectId}`, {
       method: 'GET',
+      headers: authorization ? { 'Authorization': authorization } : {},
     })
 
     if (!response.ok) {
@@ -60,10 +62,12 @@ export async function DELETE(
 ) {
   try {
     const { projectId } = params
-    
+    const authorization = request.headers.get('authorization')
+
     // Forward the request to Python backend
     const response = await fetch(`${BACKEND_URL}/api/projects/${projectId}`, {
       method: 'DELETE',
+      headers: authorization ? { 'Authorization': authorization } : {},
     })
 
     if (!response.ok) {

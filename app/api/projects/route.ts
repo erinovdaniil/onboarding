@@ -2,11 +2,15 @@ import { NextRequest, NextResponse } from 'next/server'
 
 const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:8000'
 
-export async function GET() {
+export async function GET(request: NextRequest) {
   try {
+    // Get authorization header from request
+    const authorization = request.headers.get('authorization')
+
     // Forward the request to Python backend
     const response = await fetch(`${BACKEND_URL}/api/projects/`, {
       method: 'GET',
+      headers: authorization ? { 'Authorization': authorization } : {},
     })
 
     if (!response.ok) {

@@ -7,7 +7,7 @@ import os
 from dotenv import load_dotenv
 import uvicorn
 
-from app.routers import upload, scripts, voiceover, video, projects
+from app.routers import upload, scripts, voiceover, video, projects, transcripts, avatar
 
 load_dotenv()
 
@@ -33,6 +33,8 @@ app.include_router(scripts.router, prefix="/api/scripts", tags=["scripts"])
 app.include_router(voiceover.router, prefix="/api/voiceover", tags=["voiceover"])
 app.include_router(video.router, prefix="/api/video", tags=["video"])
 app.include_router(projects.router, prefix="/api/projects", tags=["projects"])
+app.include_router(transcripts.router, prefix="/api/transcripts", tags=["transcripts"])
+app.include_router(avatar.router, prefix="/api/avatar", tags=["avatar"])
 
 
 @app.get("/")

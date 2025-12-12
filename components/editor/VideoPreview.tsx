@@ -17,6 +17,7 @@ interface VideoPreviewProps {
   onMuteToggle: () => void
   onRefreshVoiceover: () => void
   videoRef?: RefObject<HTMLVideoElement>
+  isProcessedVideo?: boolean
 }
 
 export default function VideoPreview({
@@ -25,6 +26,7 @@ export default function VideoPreview({
   onMuteToggle,
   onRefreshVoiceover,
   videoRef,
+  isProcessedVideo = false,
 }: VideoPreviewProps) {
   const [aspectRatio, setAspectRatio] = useState('wide')
 
@@ -97,10 +99,12 @@ export default function VideoPreview({
             <div className="absolute bottom-4 left-1/2 transform -translate-x-1/2 text-white/50 text-xs pointer-events-none">
               Made with Trupeer.ai
             </div>
-            {/* AI Avatar placeholder */}
-            <div className="absolute bottom-4 right-4 w-24 h-32 bg-white/10 rounded-lg border border-white/20 flex items-center justify-center pointer-events-none">
-              <span className="text-white/50 text-xs">AI Avatar</span>
-            </div>
+            {/* AI Avatar placeholder - only show for original video (not processed) */}
+            {!isProcessedVideo && (
+              <div className="absolute bottom-4 right-4 w-24 h-32 bg-white/10 rounded-lg border border-white/20 flex items-center justify-center pointer-events-none">
+                <span className="text-white/50 text-xs">AI Avatar</span>
+              </div>
+            )}
           </>
         ) : (
           <div className="text-muted-foreground text-center p-8">

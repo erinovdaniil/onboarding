@@ -18,11 +18,13 @@ interface ScriptEditorProps {
   onTranslate?: () => void
   onGenerateVoiceover?: () => void
   onProcessVideo?: () => void
+  onGenerateAvatar?: (config: { avatarId: string; position: string; size: string }) => void
   isProcessing?: boolean
   selectedLanguage?: string
   onLanguageChange?: (lang: string) => void
   selectedVoice?: string
   onVoiceChange?: (voice: string) => void
+  projectId?: string
 }
 
 const languages = [
@@ -46,6 +48,27 @@ const voices = [
   { id: 'shimmer', name: 'Shimmer' },
 ]
 
+const avatarOptions = [
+  { id: 'default', name: 'Default Avatar' },
+  { id: 'female-1', name: 'Female Avatar 1' },
+  { id: 'female-2', name: 'Female Avatar 2' },
+  { id: 'male-1', name: 'Male Avatar 1' },
+  { id: 'male-2', name: 'Male Avatar 2' },
+]
+
+const positionOptions = [
+  { id: 'bottom-right', name: 'Bottom Right' },
+  { id: 'bottom-left', name: 'Bottom Left' },
+  { id: 'top-right', name: 'Top Right' },
+  { id: 'top-left', name: 'Top Left' },
+]
+
+const sizeOptions = [
+  { id: 'small', name: 'Small' },
+  { id: 'medium', name: 'Medium' },
+  { id: 'large', name: 'Large' },
+]
+
 export default function ScriptEditor({
   script,
   onScriptChange,
@@ -56,13 +79,18 @@ export default function ScriptEditor({
   onTranslate,
   onGenerateVoiceover,
   onProcessVideo,
+  onGenerateAvatar,
   isProcessing = false,
   selectedLanguage = 'en',
   onLanguageChange,
   selectedVoice = 'alloy',
   onVoiceChange,
+  projectId,
 }: ScriptEditorProps) {
   const [activeTab, setActiveTab] = useState('script')
+  const [avatarId, setAvatarId] = useState('default')
+  const [avatarPosition, setAvatarPosition] = useState('bottom-right')
+  const [avatarSize, setAvatarSize] = useState('medium')
 
   // Parse script with timestamps (format: "0:00 Text here")
   const scriptLines = script
@@ -81,7 +109,7 @@ export default function ScriptEditor({
       {/* Tab Navigation */}
       <Tabs value={activeTab} onValueChange={setActiveTab} className="flex-1 flex flex-col">
         <div className="border-b px-4">
-          <TabsList className="grid w-full grid-cols-7">
+          <TabsList className="w-full justify-start">
             <TabsTrigger value="script" className="text-xs">Script</TabsTrigger>
             <TabsTrigger value="ai-voice" className="text-xs">AI Voice</TabsTrigger>
             <TabsTrigger value="music" className="text-xs">Music</TabsTrigger>
@@ -287,8 +315,99 @@ export default function ScriptEditor({
         <TabsContent value="zooms" className="flex-1 p-4">
           <p className="text-sm text-muted-foreground">Zoom controls coming soon...</p>
         </TabsContent>
-        <TabsContent value="ai-avatar" className="flex-1 p-4">
-          <p className="text-sm text-muted-foreground">AI Avatar settings coming soon...</p>
+        <TabsContent value="ai-avatar" className="flex-1 p-4 space-y-4">
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <Label>Enable AI Avatar</Label>
+              <div className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  defaultChecked
+                  className="h-4 w-4 rounded border-gray-300"
+                />
+                <span className="text-sm text-muted-foreground">
+                  Enable AI avatar in video
+                </span>
+              </div>
+            </div>
+            
+            <div className="space-y-2">
+              <Label>Select Avatar</Label>
+              <Select value={avatarId} onValueChange={setAvatarId}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {avatarOptions.map((avatar) => (
+                    <SelectItem key={avatar.id} value={avatar.id}>
+                      {avatar.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-2">
+              <Label>Position</Label>
+              <Select value={avatarPosition} onValueChange={setAvatarPosition}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {positionOptions.map((pos) => (
+                    <SelectItem key={pos.id} value={pos.id}>
+                      {pos.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-2">
+              <Label>Size</Label>
+              <Select value={avatarSize} onValueChange={setAvatarSize}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {sizeOptions.map((size) => (
+                    <SelectItem key={size.id} value={size.id}>
+                      {size.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            {onGenerateAvatar && (
+              <Button
+                onClick={() => onGenerateAvatar({
+                  avatarId,
+                  position: avatarPosition,
+                  size: avatarSize,
+                })}
+                disabled={!script || isProcessing}
+                className="w-full gap-2"
+              >
+                {isProcessing ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    Generating Avatar...
+                  </>
+                ) : (
+                  <>
+                    <Sparkles className="w-4 h-4" />
+                    Generate Avatar
+                  </>
+                )}
+              </Button>
+            )}
+
+            <div className="text-xs text-muted-foreground p-3 bg-muted rounded-lg">
+              <p className="font-semibold mb-1">Note:</p>
+              <p>Avatar will be composited onto your video during processing. Make sure you have a script generated before creating the avatar.</p>
+            </div>
+          </div>
         </TabsContent>
         <TabsContent value="elements" className="flex-1 p-4">
           <p className="text-sm text-muted-foreground">Elements library coming soon...</p>

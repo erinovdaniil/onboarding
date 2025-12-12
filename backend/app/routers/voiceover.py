@@ -3,15 +3,17 @@ from pydantic import BaseModel
 from openai import OpenAI
 import os
 from pathlib import Path
-import aiofiles
+
+from app.storage import upload_file_to_storage, ensure_bucket_exists
+from app.database import save_video_file
 
 router = APIRouter()
 
 # Initialize OpenAI client
 openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY")) if os.getenv("OPENAI_API_KEY") else None
 
-# Get upload directory
-UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "../public/uploads"))
+# Supabase Storage bucket name
+STORAGE_BUCKET = os.getenv("SUPABASE_STORAGE_BUCKET", "videos")
 
 
 class VoiceoverRequest(BaseModel):
@@ -42,20 +44,32 @@ async def generate_voiceover(request: VoiceoverRequest):
             input=request.script,
         )
 
-        # Save the audio file
-        project_dir = UPLOAD_DIR / request.projectId
-        project_dir.mkdir(parents=True, exist_ok=True)
-
-        audio_path = project_dir / "voiceover.mp3"
-        
-        # Write audio content to file
+        # Get audio content
         audio_content = response.content
-        async with aiofiles.open(audio_path, "wb") as f:
-            await f.write(audio_content)
+        
+        # Ensure storage bucket exists
+        ensure_bucket_exists(STORAGE_BUCKET, public=True)
+        
+        # Upload to Supabase Storage
+        storage_path = f"{request.projectId}/voiceover.mp3"
+        audio_url = await upload_file_to_storage(
+            bucket_name=STORAGE_BUCKET,
+            file_path=storage_path,
+            file_content=audio_content,
+            content_type="audio/mpeg"
+        )
+        
+        # Save video file metadata
+        await save_video_file(
+            project_id=request.projectId,
+            file_type="audio",
+            storage_path=storage_path,
+            file_size=len(audio_content)
+        )
 
         return {
             "success": True,
-            "audioUrl": f"/uploads/{request.projectId}/voiceover.mp3",
+            "audioUrl": audio_url,
         }
 
     except Exception as e:
