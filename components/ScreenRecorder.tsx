@@ -21,15 +21,17 @@ export default function ScreenRecorder({ onRecordingComplete }: ScreenRecorderPr
   const timerRef = useRef<NodeJS.Timeout | null>(null)
 
   const stopRecording = useCallback(() => {
-    if (mediaRecorderRef.current) {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      // Request final data chunk before stopping
+      mediaRecorderRef.current.requestData()
+      // Stop the recorder - this will trigger onstop event which handles track cleanup
       mediaRecorderRef.current.stop()
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach(track => track.stop())
-      }
       if (timerRef.current) {
         clearInterval(timerRef.current)
       }
       setIsRecording(false)
+      // Note: Track cleanup is now handled in the onstop event handler
+      // to ensure all data is captured before stopping tracks
     }
   }, [])
 

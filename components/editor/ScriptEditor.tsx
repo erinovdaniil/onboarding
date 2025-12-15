@@ -190,31 +190,12 @@ export default function ScriptEditor({
             </div>
           </div>
 
-          <div className="flex-1 overflow-y-auto p-4 space-y-2">
-            {scriptLines.length > 0 ? (
-              scriptLines.map((line) => (
-                <div key={line.id} className="text-sm py-1">
-                  {line.time && (
-                    <span className="text-muted-foreground font-mono mr-2">
-                      {line.time}
-                    </span>
-                  )}
-                  <span>{line.text}</span>
-                </div>
-              ))
-            ) : (
-              <div className="text-sm text-muted-foreground text-center py-8">
-                No script content yet. Generate a script to get started.
-              </div>
-            )}
-          </div>
-
-          <div className="p-4 border-t space-y-2">
+          <div className="p-4 space-y-2">
             <Textarea
               placeholder="Enter script text..."
               value={script}
               onChange={(e) => onScriptChange(e.target.value)}
-              className="min-h-[80px] resize-none"
+              className="h-[200px] resize-none"
               disabled={isProcessing}
             />
             {onTranslate && (

@@ -23,7 +23,7 @@ async def upload_file_to_storage(
         result = supabase.storage.from_(bucket_name).upload(
             file_path,
             file_content,
-            file_options={"content-type": content_type or "application/octet-stream", "upsert": "true"}
+            file_options={"contentType": content_type or "application/octet-stream", "upsert": "true"}
         )
         
         # Get public URL

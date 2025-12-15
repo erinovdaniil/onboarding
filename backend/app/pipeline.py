@@ -60,17 +60,27 @@ async def clean_transcript_segments(segments: List[Dict[str, Any]]) -> List[Dict
         try:
             logger.info(f"Cleaning segment {i+1}/{len(segments)}")
 
-            # Use GPT-4 to clean this segment's text
-            response = await openai_client.chat.completions.acreate(
+            # Use GPT-4 to ONLY remove filler words - absolutely no other changes
+            # CRITICAL: Do not change any actual words the user said
+            response = openai_client.chat.completions.create(
                 model="gpt-4",
                 messages=[
                     {
                         "role": "system",
                         "content": (
-                            "You are a professional transcript editor. "
-                            "Remove filler words (um, uh, like, you know), fix grammar and punctuation, "
-                            "and improve clarity while keeping the exact meaning unchanged. "
-                            "Output ONLY the cleaned text, nothing else."
+                            "You are a transcript cleaner. Your ONLY job is to remove filler words.\n\n"
+                            "REMOVE ONLY these exact filler words/phrases:\n"
+                            "- um, uh, er, ah, hmm\n"
+                            "- repeated words like 'I I' or 'the the'\n\n"
+                            "RULES:\n"
+                            "- Do NOT change ANY other words\n"
+                            "- Do NOT fix grammar\n"
+                            "- Do NOT rephrase anything\n"
+                            "- Do NOT add words\n"
+                            "- Do NOT correct what seems like mistakes\n"
+                            "- Keep the EXACT same meaning and wording\n\n"
+                            "If the input has no filler words, return it EXACTLY as-is.\n"
+                            "Output ONLY the text, nothing else."
                         )
                     },
                     {
@@ -79,7 +89,7 @@ async def clean_transcript_segments(segments: List[Dict[str, Any]]) -> List[Dict
                     }
                 ],
                 max_tokens=500,
-                temperature=0.3  # Lower temperature for more consistent results
+                temperature=0.0  # Zero temperature for deterministic output
             )
 
             cleaned_text = response.choices[0].message.content.strip()
@@ -106,14 +116,175 @@ async def clean_transcript_segments(segments: List[Dict[str, Any]]) -> List[Dict
     return cleaned_segments
 
 
+def get_audio_duration(audio_path: str) -> float:
+    """Get duration of an audio file using ffprobe."""
+    import subprocess
+    try:
+        result = subprocess.run([
+            "ffprobe", "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            audio_path
+        ], capture_output=True, timeout=30)
+        if result.returncode == 0:
+            return float(result.stdout.decode().strip())
+    except Exception as e:
+        logger.warning(f"Could not get audio duration: {e}")
+    return 0.0
+
+
+async def generate_segmented_voiceover(
+    project_id: str,
+    segments: List[Dict[str, Any]],
+    voice: str = "alloy"
+) -> Optional[str]:
+    """
+    Generate voiceover audio segment by segment, matching original timing.
+
+    This ensures the voiceover matches the original video duration by:
+    1. Generating TTS for each segment individually
+    2. Adding silence padding after each segment to match original duration
+    3. Concatenating all segments into one audio file
+
+    Args:
+        project_id: UUID of the project
+        segments: List of cleaned segments with start/end timestamps
+        voice: OpenAI TTS voice name
+
+    Returns:
+        URL of the generated voiceover audio, or None if failed
+    """
+    import subprocess
+    import tempfile
+    from pathlib import Path
+
+    try:
+        logger.info(f"Generating segmented voiceover for project {project_id} with {len(segments)} segments")
+
+        if not openai_client:
+            raise Exception("OpenAI API key not configured")
+
+        from app.storage import upload_file_to_storage, ensure_bucket_exists
+        from app.database import save_video_file
+
+        STORAGE_BUCKET = os.getenv("SUPABASE_STORAGE_BUCKET", "videos")
+        ensure_bucket_exists(STORAGE_BUCKET, public=True)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            segment_files = []
+
+            for i, seg in enumerate(segments):
+                cleaned_text = seg.get("cleaned_text", seg.get("text", ""))
+                if not cleaned_text.strip():
+                    logger.warning(f"Segment {i} has no text, skipping")
+                    continue
+
+                # Calculate target duration from original timestamps
+                start_time = seg.get("start", 0)
+                end_time = seg.get("end", 0)
+                target_duration = end_time - start_time
+
+                logger.info(f"Segment {i+1}/{len(segments)}: {target_duration:.2f}s target, text: '{cleaned_text[:50]}...'")
+
+                # Generate TTS for this segment
+                try:
+                    response = openai_client.audio.speech.create(
+                        model="tts-1",
+                        voice=voice,
+                        input=cleaned_text
+                    )
+                except Exception as e:
+                    logger.error(f"TTS failed for segment {i}: {e}")
+                    continue
+
+                # Save raw TTS to temp file
+                raw_file = temp_path / f"seg_{i}_raw.mp3"
+                with open(raw_file, "wb") as f:
+                    f.write(response.content)
+
+                # Get actual TTS duration
+                tts_duration = get_audio_duration(str(raw_file))
+                logger.info(f"Segment {i+1}: TTS duration = {tts_duration:.2f}s, target = {target_duration:.2f}s")
+
+                # If TTS is shorter than target, pad with silence
+                final_file = temp_path / f"seg_{i}_final.mp3"
+                if target_duration > 0 and tts_duration < target_duration:
+                    pad_duration = target_duration - tts_duration
+                    logger.info(f"Segment {i+1}: Adding {pad_duration:.2f}s silence padding")
+
+                    # Use ffmpeg to add silence padding at the end
+                    subprocess.run([
+                        "ffmpeg", "-i", str(raw_file),
+                        "-af", f"apad=pad_dur={pad_duration}",
+                        "-y", str(final_file)
+                    ], capture_output=True, timeout=30)
+
+                    if final_file.exists():
+                        segment_files.append(str(final_file))
+                    else:
+                        # Fallback to raw file
+                        segment_files.append(str(raw_file))
+                else:
+                    # TTS is already long enough, use as-is
+                    segment_files.append(str(raw_file))
+
+            if not segment_files:
+                raise Exception("No audio segments generated")
+
+            # Concatenate all segments using ffmpeg concat demuxer
+            concat_list_file = temp_path / "concat_list.txt"
+            with open(concat_list_file, "w") as f:
+                for path in segment_files:
+                    f.write(f"file '{path}'\n")
+
+            output_file = temp_path / "voiceover.mp3"
+            concat_result = subprocess.run([
+                "ffmpeg", "-f", "concat", "-safe", "0",
+                "-i", str(concat_list_file),
+                "-c:a", "libmp3lame", "-q:a", "2",
+                "-y", str(output_file)
+            ], capture_output=True, timeout=120)
+
+            if concat_result.returncode != 0:
+                logger.error(f"FFmpeg concat failed: {concat_result.stderr.decode()}")
+                raise Exception("Failed to concatenate audio segments")
+
+            # Read final audio
+            with open(output_file, "rb") as f:
+                audio_content = f.read()
+
+            final_duration = get_audio_duration(str(output_file))
+            logger.info(f"Final voiceover duration: {final_duration:.2f}s")
+
+            # Upload to Supabase Storage
+            storage_path = f"{project_id}/voiceover.mp3"
+            audio_url = await upload_file_to_storage(
+                bucket_name=STORAGE_BUCKET,
+                file_path=storage_path,
+                file_content=audio_content,
+                content_type="audio/mpeg"
+            )
+
+            # Save metadata
+            await save_video_file(project_id, "audio", storage_path, len(audio_content))
+
+            logger.info(f"Segmented voiceover generated successfully: {audio_url}")
+            return audio_url
+
+    except Exception as e:
+        logger.error(f"Error generating segmented voiceover: {e}", exc_info=True)
+        return None
+
+
 async def generate_voiceover_internal(
     project_id: str,
     script: str,
     voice: str = "alloy"
 ) -> Optional[str]:
     """
-    Generate voiceover audio using OpenAI TTS.
-    This is an internal function called by the pipeline.
+    Generate voiceover audio using OpenAI TTS (simple version).
+    This is a fallback when segments aren't available.
 
     Args:
         project_id: UUID of the project
@@ -124,7 +295,7 @@ async def generate_voiceover_internal(
         URL of the generated voiceover audio, or None if failed
     """
     try:
-        logger.info(f"Generating voiceover for project {project_id} with voice '{voice}'")
+        logger.info(f"Generating simple voiceover for project {project_id} with voice '{voice}'")
 
         if not openai_client:
             raise Exception("OpenAI API key not configured")
@@ -225,9 +396,11 @@ async def process_video_internal(project_id: str, enable_cursor_zoom: bool = Tru
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
 
-            # Download original video
+            # Download original video (may be MP4 if converted during upload)
             original_video_content = await download_file_from_storage(STORAGE_BUCKET, original_storage_path)
-            original_video_path = temp_path / "original.webm"
+            # Use the correct extension from storage path
+            original_ext = Path(original_storage_path).suffix or ".mp4"
+            original_video_path = temp_path / f"original{original_ext}"
             with open(original_video_path, "wb") as f:
                 f.write(original_video_content)
 
@@ -274,14 +447,117 @@ async def process_video_internal(project_id: str, enable_cursor_zoom: bool = Tru
                             vid_width,
                             vid_height,
                             vid_fps,
-                            base_zoom=1.2  # 20% zoom
+                            base_zoom=1.0,  # No zoom by default
+                            max_zoom=1.5    # Zoom in to 1.5x when pointing
                         )
-                        logger.info("Cursor zoom filter generated successfully")
+                        if zoom_filter:
+                            logger.info("Cursor zoom filter generated successfully")
+                        else:
+                            logger.info("No zoom events detected")
                 except Exception as e:
                     logger.warning(f"Cursor zoom detection failed, proceeding without zoom: {e}")
                     enable_cursor_zoom = False
 
-            # Build FFmpeg command
+            # Get video duration using FFprobe (reliable for WebM/VP9)
+            # OpenCV's CAP_PROP_FRAME_COUNT is unreliable for WebM files
+            video_duration = 0.0
+            video_fps = 30.0
+            try:
+                # Strategy 1: Get duration from format and stream info
+                probe_cmd = [
+                    "ffprobe", "-v", "error",
+                    "-show_entries", "format=duration",
+                    "-show_entries", "stream=duration,r_frame_rate,nb_frames",
+                    "-of", "json",
+                    str(original_video_path)
+                ]
+                probe_result = subprocess.run(probe_cmd, capture_output=True, timeout=30)
+                if probe_result.returncode == 0:
+                    import json as json_module
+                    probe_data = json_module.loads(probe_result.stdout.decode())
+
+                    # Try to get duration from format first
+                    if "format" in probe_data and "duration" in probe_data["format"]:
+                        try:
+                            video_duration = float(probe_data["format"]["duration"])
+                        except (ValueError, TypeError):
+                            pass
+
+                    # If format duration is 0 or missing, try stream duration
+                    if video_duration <= 0 and "streams" in probe_data:
+                        for stream in probe_data["streams"]:
+                            if "duration" in stream:
+                                try:
+                                    stream_dur = float(stream["duration"])
+                                    if stream_dur > 0:
+                                        video_duration = stream_dur
+                                        break
+                                except (ValueError, TypeError):
+                                    pass
+
+                    # Get fps from stream
+                    if "streams" in probe_data and len(probe_data["streams"]) > 0:
+                        fps_str = probe_data["streams"][0].get("r_frame_rate", "30/1")
+                        if "/" in fps_str:
+                            num, den = fps_str.split("/")
+                            video_fps = float(num) / float(den) if float(den) > 0 else 30.0
+                        else:
+                            video_fps = float(fps_str)
+
+                        # If still no duration, calculate from nb_frames and fps
+                        if video_duration <= 0:
+                            nb_frames = probe_data["streams"][0].get("nb_frames")
+                            if nb_frames and video_fps > 0:
+                                try:
+                                    video_duration = int(nb_frames) / video_fps
+                                except (ValueError, TypeError):
+                                    pass
+
+                    logger.info(f"FFprobe result: duration={video_duration:.2f}s, fps={video_fps:.2f}")
+
+                # Strategy 2: If still no duration, use ffprobe with -count_frames (slower but reliable)
+                if video_duration <= 0:
+                    logger.info("Format/stream duration not available, counting frames...")
+                    probe_cmd2 = [
+                        "ffprobe", "-v", "error",
+                        "-select_streams", "v:0",
+                        "-count_frames",
+                        "-show_entries", "stream=nb_read_frames,r_frame_rate",
+                        "-of", "json",
+                        str(original_video_path)
+                    ]
+                    probe_result2 = subprocess.run(probe_cmd2, capture_output=True, timeout=120)
+                    if probe_result2.returncode == 0:
+                        probe_data2 = json_module.loads(probe_result2.stdout.decode())
+                        if "streams" in probe_data2 and len(probe_data2["streams"]) > 0:
+                            nb_read_frames = probe_data2["streams"][0].get("nb_read_frames")
+                            fps_str = probe_data2["streams"][0].get("r_frame_rate", "30/1")
+                            if "/" in fps_str:
+                                num, den = fps_str.split("/")
+                                video_fps = float(num) / float(den) if float(den) > 0 else 30.0
+                            if nb_read_frames and video_fps > 0:
+                                video_duration = int(nb_read_frames) / video_fps
+                                logger.info(f"Counted {nb_read_frames} frames, duration={video_duration:.2f}s")
+
+                logger.info(f"Original video duration: {video_duration:.2f}s at {video_fps:.2f} fps (via ffprobe)")
+            except Exception as e:
+                logger.warning(f"FFprobe failed, falling back to OpenCV: {e}")
+                # Fallback to OpenCV (may not be accurate for WebM)
+                import cv2
+                cap = cv2.VideoCapture(str(original_video_path))
+                video_fps = cap.get(cv2.CAP_PROP_FPS)
+                total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                if video_fps > 0 and video_fps <= 120 and total_frames > 0:
+                    video_duration = total_frames / video_fps
+                cap.release()
+                logger.info(f"Original video duration: {video_duration:.2f}s (via OpenCV fallback)")
+
+            # If duration is still invalid, skip apad filter
+            if video_duration <= 0:
+                logger.warning("Could not determine video duration, will skip audio padding")
+                video_duration = 0
+
+            # Build FFmpeg command - preserve full video duration
             processed_video_path = temp_path / "processed.mp4"
             ffmpeg_cmd = [
                 "ffmpeg",
@@ -312,19 +588,37 @@ async def process_video_internal(project_id: str, enable_cursor_zoom: bool = Tru
                 overlay_pos = position_map.get(position, position_map["bottom-right"])
 
                 # Build filter_complex with optional zoom
+                # Audio filter: pad voiceover with silence to match video duration (if known)
+                use_apad = video_duration > 0
+
                 if zoom_filter and enable_cursor_zoom:
                     # Zoom video first, then add avatar
-                    filter_complex = (
-                        f"[0:v]{zoom_filter}[zoomed];"
-                        f"[2:v]scale=iw*{scale}:ih*{scale}[avatar];"
-                        f"[zoomed][avatar]overlay={overlay_pos}[v]"
-                    )
+                    if use_apad:
+                        filter_complex = (
+                            f"[0:v]{zoom_filter}[zoomed];"
+                            f"[2:v]scale=iw*{scale}:ih*{scale}[avatar];"
+                            f"[zoomed][avatar]overlay={overlay_pos}:shortest=1[v];"
+                            f"[1:a]apad=whole_dur={video_duration}[a]"
+                        )
+                    else:
+                        filter_complex = (
+                            f"[0:v]{zoom_filter}[zoomed];"
+                            f"[2:v]scale=iw*{scale}:ih*{scale}[avatar];"
+                            f"[zoomed][avatar]overlay={overlay_pos}:shortest=1[v]"
+                        )
                 else:
                     # No zoom, just avatar overlay
-                    filter_complex = (
-                        f"[2:v]scale=iw*{scale}:ih*{scale}[avatar];"
-                        f"[0:v][avatar]overlay={overlay_pos}[v]"
-                    )
+                    if use_apad:
+                        filter_complex = (
+                            f"[2:v]scale=iw*{scale}:ih*{scale}[avatar];"
+                            f"[0:v][avatar]overlay={overlay_pos}:shortest=1[v];"
+                            f"[1:a]apad=whole_dur={video_duration}[a]"
+                        )
+                    else:
+                        filter_complex = (
+                            f"[2:v]scale=iw*{scale}:ih*{scale}[avatar];"
+                            f"[0:v][avatar]overlay={overlay_pos}:shortest=1[v]"
+                        )
 
                 # Loop static image for video duration and overlay
                 ffmpeg_cmd.extend([
@@ -333,8 +627,14 @@ async def process_video_internal(project_id: str, enable_cursor_zoom: bool = Tru
                     "-filter_complex",
                     filter_complex,
                     "-map", "[v]",
-                    "-map", "1:a:0",  # Audio from voiceover only
-                    "-shortest",  # Match output to shortest input (voiceover length)
+                ])
+
+                if use_apad:
+                    ffmpeg_cmd.extend(["-map", "[a]"])  # Use padded audio
+                else:
+                    ffmpeg_cmd.extend(["-map", "1:a:0", "-shortest"])  # Use voiceover directly with -shortest
+
+                ffmpeg_cmd.extend([
                     "-c:v", "libx264",
                     "-c:a", "aac",
                     "-y",
@@ -342,29 +642,64 @@ async def process_video_internal(project_id: str, enable_cursor_zoom: bool = Tru
                 ])
             else:
                 # No avatar - apply zoom if available, otherwise just combine
+                use_apad = video_duration > 0
+
                 if zoom_filter and enable_cursor_zoom:
-                    ffmpeg_cmd.extend([
-                        "-filter_complex",
-                        f"[0:v]{zoom_filter}[v]",
-                        "-map", "[v]",
-                        "-map", "1:a:0",  # Audio from voiceover
-                        "-shortest",  # Match output to voiceover length
-                        "-c:v", "libx264",
-                        "-c:a", "aac",
-                        "-y",
-                        str(processed_video_path)
-                    ])
+                    if use_apad:
+                        # Pad audio to match video duration
+                        filter_complex = (
+                            f"[0:v]{zoom_filter}[v];"
+                            f"[1:a]apad=whole_dur={video_duration}[a]"
+                        )
+                        ffmpeg_cmd.extend([
+                            "-filter_complex",
+                            filter_complex,
+                            "-map", "[v]",
+                            "-map", "[a]",  # Use padded audio
+                            "-c:v", "libx264",
+                            "-c:a", "aac",
+                            "-y",
+                            str(processed_video_path)
+                        ])
+                    else:
+                        # No duration known, use -shortest
+                        filter_complex = f"[0:v]{zoom_filter}[v]"
+                        ffmpeg_cmd.extend([
+                            "-filter_complex",
+                            filter_complex,
+                            "-map", "[v]",
+                            "-map", "1:a:0",
+                            "-shortest",
+                            "-c:v", "libx264",
+                            "-c:a", "aac",
+                            "-y",
+                            str(processed_video_path)
+                        ])
                 else:
                     # No zoom, no avatar - just combine video and voiceover
-                    ffmpeg_cmd.extend([
-                        "-map", "0:v:0",  # Video from original
-                        "-map", "1:a:0",  # Audio from voiceover
-                        "-shortest",  # Match output to voiceover length
-                        "-c:v", "libx264",
-                        "-c:a", "aac",
-                        "-y",
-                        str(processed_video_path)
-                    ])
+                    if use_apad:
+                        filter_complex = f"[1:a]apad=whole_dur={video_duration}[a]"
+                        ffmpeg_cmd.extend([
+                            "-filter_complex",
+                            filter_complex,
+                            "-map", "0:v:0",  # Video from original
+                            "-map", "[a]",  # Use padded audio
+                            "-c:v", "libx264",
+                            "-c:a", "aac",
+                            "-y",
+                            str(processed_video_path)
+                        ])
+                    else:
+                        # No duration known, use -shortest
+                        ffmpeg_cmd.extend([
+                            "-map", "0:v:0",
+                            "-map", "1:a:0",
+                            "-shortest",
+                            "-c:v", "libx264",
+                            "-c:a", "aac",
+                            "-y",
+                            str(processed_video_path)
+                        ])
 
             # Execute FFmpeg
             try:
@@ -419,7 +754,7 @@ async def process_video_internal(project_id: str, enable_cursor_zoom: bool = Tru
         return None
 
 
-async def run_automatic_pipeline(project_id: str, user_id: Optional[str] = None):
+async def run_automatic_pipeline(project_id: str, user_id: Optional[str] = None, transcript_data: Optional[Dict[str, Any]] = None):
     """
     Main pipeline orchestration function.
     Runs all stages of video processing automatically after upload.
@@ -435,6 +770,7 @@ async def run_automatic_pipeline(project_id: str, user_id: Optional[str] = None)
     Args:
         project_id: UUID of the project to process
         user_id: Optional user ID for logging/tracking
+        transcript_data: Optional transcript data passed directly (avoids DB read issues)
     """
     try:
         logger.info(f"Starting automatic pipeline for project {project_id}")
@@ -445,7 +781,11 @@ async def run_automatic_pipeline(project_id: str, user_id: Optional[str] = None)
             logger.error(f"Project {project_id} not found")
             return
 
-        transcript_record = await get_transcript(project_id)
+        # Use passed transcript_data if available, otherwise fetch from DB
+        transcript_record = transcript_data
+        if not transcript_record:
+            transcript_record = await get_transcript(project_id)
+
         if not transcript_record:
             logger.error(f"No transcript found for project {project_id}")
             await update_project_status(
@@ -500,14 +840,23 @@ async def run_automatic_pipeline(project_id: str, user_id: Optional[str] = None)
             logger.warning("Using original transcript as fallback")
 
         # ============================================================
-        # STAGE 2: Generate Voiceover
+        # STAGE 2: Generate Voiceover (Segment-Based for Timing)
         # ============================================================
-        logger.info("Stage 2: Generating voiceover")
+        logger.info("Stage 2: Generating voiceover with segment timing")
         await update_project_status(project_id, "generating_voiceover", processing_step="Generating AI voiceover")
 
         try:
             voice = project.get("voiceover_voice", "alloy")
-            voiceover_url = await generate_voiceover_internal(project_id, full_cleaned_text, voice)
+
+            # Use segmented voiceover generation to match original timing
+            # This adds silence padding between segments to preserve video duration
+            if cleaned_segments and len(cleaned_segments) > 0:
+                logger.info(f"Using segmented voiceover with {len(cleaned_segments)} segments")
+                voiceover_url = await generate_segmented_voiceover(project_id, cleaned_segments, voice)
+            else:
+                # Fallback to simple voiceover if no segments
+                logger.info("No segments available, using simple voiceover generation")
+                voiceover_url = await generate_voiceover_internal(project_id, full_cleaned_text, voice)
 
             if not voiceover_url:
                 raise Exception("Voiceover generation returned None")
@@ -531,7 +880,8 @@ async def run_automatic_pipeline(project_id: str, user_id: Optional[str] = None)
         await update_project_status(project_id, "processing_video", processing_step="Processing video with avatar")
 
         try:
-            processed_video_url = await process_video_internal(project_id)
+            # Disable automatic cursor zoom in pipeline - users control zoom via timeline editor
+            processed_video_url = await process_video_internal(project_id, enable_cursor_zoom=False)
 
             if processed_video_url:
                 # Update project with processed video URL

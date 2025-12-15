@@ -1,15 +1,22 @@
+from dotenv import load_dotenv
+load_dotenv()  # Must load before importing routers
+
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 from typing import Optional, List
 import os
-from dotenv import load_dotenv
 import uvicorn
+import logging
 
-from app.routers import upload, scripts, voiceover, video, projects, transcripts, avatar
+from app.routers import upload, scripts, voiceover, video, projects, transcripts, avatar, zoom
 
-load_dotenv()
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 
 app = FastAPI(
     title="Trupeer Clone API",
@@ -35,6 +42,7 @@ app.include_router(video.router, prefix="/api/video", tags=["video"])
 app.include_router(projects.router, prefix="/api/projects", tags=["projects"])
 app.include_router(transcripts.router, prefix="/api/transcripts", tags=["transcripts"])
 app.include_router(avatar.router, prefix="/api/avatar", tags=["avatar"])
+app.include_router(zoom.router, prefix="/api/zoom", tags=["zoom"])
 
 
 @app.get("/")

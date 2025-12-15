@@ -8,9 +8,10 @@ import VideoPreview from '@/components/editor/VideoPreview'
 import VideoTimeline from '@/components/editor/VideoTimeline'
 import DocumentView from '@/components/editor/DocumentView'
 import { VideoStep } from '@/components/editor/StepEditor'
+import { ZoomConfig } from '@/components/editor/ZoomBlock'
 import { Loader2 } from 'lucide-react'
 import EditorLayout from '@/components/layouts/EditorLayout'
-import { captureVideoFrame, generateMockSteps } from '@/lib/videoUtils'
+import { captureVideoFrame, captureFrameFromUrl, generateMockSteps } from '@/lib/videoUtils'
 
 export default function EditorPage() {
   const params = useParams()
@@ -34,7 +35,10 @@ export default function EditorPage() {
   const [steps, setSteps] = useState<VideoStep[]>([])
   const [capturingStepIds, setCapturingStepIds] = useState<string[]>([])
   const [transcript, setTranscript] = useState<any>(null)
+  const [zoomConfig, setZoomConfig] = useState<ZoomConfig | null>(null)
+  const [isApplyingZoom, setIsApplyingZoom] = useState(false)
   const stepsCreatedFromTranscriptRef = useRef(false)
+  const isSeekingRef = useRef(false) // Track if user is manually seeking
 
   useEffect(() => {
     fetchProject()
@@ -62,11 +66,9 @@ export default function EditorPage() {
     }
   }, [videoUrl])
 
-  useEffect(() => {
-    const video = videoRef.current
-    if (!video) return
-    video.currentTime = currentTime
-  }, [currentTime])
+  // Removed: This effect was causing play/pause glitching because it would
+  // seek the video on every timeupdate, creating a feedback loop.
+  // Instead, we only seek in handleTimeChange when user explicitly changes time.
 
   // Generate mock steps when video duration is available (only if no transcript available)
   useEffect(() => {
@@ -193,6 +195,13 @@ export default function EditorPage() {
           // Try to fetch transcript separately
           loadTranscript()
         }
+
+        // Load zoom config if available
+        if (data.zoom_config) {
+          setZoomConfig(data.zoom_config)
+        } else {
+          loadZoomConfig()
+        }
       } else {
         // Fallback: try to get from projects list
         const projectsResponse = await fetch('/api/projects')
@@ -231,6 +240,20 @@ export default function EditorPage() {
     }
   }
 
+  const loadZoomConfig = async () => {
+    try {
+      const response = await fetch(`/api/zoom/${projectId}`)
+      if (response.ok) {
+        const data = await response.json()
+        if (data.zoomConfig) {
+          setZoomConfig(data.zoomConfig)
+        }
+      }
+    } catch (error) {
+      console.error('Error loading zoom config:', error)
+    }
+  }
+
   // Create steps from transcript segments when video is loaded and transcript is available
   useEffect(() => {
     const createStepsFromTranscript = async () => {
@@ -261,12 +284,12 @@ export default function EditorPage() {
         // Mark as created
         stepsCreatedFromTranscriptRef.current = true
 
-        // Create steps from segments
+        // Create steps from segments (use AI-generated title from backend)
         const newSteps: VideoStep[] = segments.map((seg: any, index: number) => ({
           id: seg.id || `step-${index}`,
           startTime: seg.startTime || 0,
-          endTime: seg.endTime || Math.min(seg.startTime + 7, duration),
-          title: `Step ${index + 1}`,
+          endTime: seg.endTime || Math.min(seg.startTime + 10, duration),
+          title: seg.title || `Step ${index + 1}`,  // Use backend-generated title
           transcript: seg.transcript || seg.text || '',
           screenshot: undefined,
         }))
@@ -275,10 +298,25 @@ export default function EditorPage() {
         setSteps(newSteps)
 
         // Capture screenshots for each step asynchronously
+        // Capture at middle of step for better representation
+        // Use URL-based capture to avoid CORS issues
+        const currentVideoUrl = videoRef.current?.src
+        if (!currentVideoUrl) return
+
         for (const step of newSteps) {
           try {
             setCapturingStepIds(prev => [...prev, step.id])
-            const screenshot = await captureVideoFrame(videoRef.current!, step.startTime)
+            // Capture at middle of step instead of start
+            const middleTime = (step.startTime + step.endTime) / 2
+
+            // Try URL-based capture first (handles CORS better)
+            let screenshot: string
+            try {
+              screenshot = await captureFrameFromUrl(currentVideoUrl, middleTime)
+            } catch (urlError) {
+              console.warn('URL capture failed, trying video ref:', urlError)
+              screenshot = await captureVideoFrame(videoRef.current!, middleTime)
+            }
 
             setSteps(prevSteps =>
               prevSteps.map(s =>
@@ -573,6 +611,46 @@ export default function EditorPage() {
     }
   }, [currentTime, duration])
 
+  const handleZoomChange = useCallback(async (zoom: ZoomConfig | null) => {
+    setZoomConfig(zoom)
+
+    // Save zoom config to backend
+    if (projectId && !projectId.startsWith('placeholder-')) {
+      try {
+        await fetch(`/api/zoom/${projectId}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ zoomConfig: zoom }),
+        })
+      } catch (error) {
+        console.error('Failed to save zoom config:', error)
+      }
+    }
+  }, [projectId])
+
+  const handleApplyZoom = useCallback(async () => {
+    if (!projectId || projectId.startsWith('placeholder-')) return
+
+    setIsApplyingZoom(true)
+    try {
+      // Save zoom config - preview effect is applied instantly via CSS transform
+      if (zoomConfig) {
+        await fetch(`/api/zoom/${projectId}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ zoomConfig }),
+        })
+      }
+      // The zoom effect is now shown in real-time via CSS transform in VideoPreview
+      // FFmpeg processing will happen only on final export
+    } catch (error) {
+      console.error('Error saving zoom config:', error)
+      alert('Failed to save zoom effect')
+    } finally {
+      setIsApplyingZoom(false)
+    }
+  }, [projectId, zoomConfig])
+
   const formatTime = (seconds: number) => {
     const mins = Math.floor(seconds / 60)
     const secs = Math.floor(seconds % 60)
@@ -641,7 +719,7 @@ export default function EditorPage() {
           </div>
 
           {/* Center Panel - Video Preview */}
-          <div className="flex-1 flex flex-col px-80">
+          <div className="flex-1 flex flex-col">
             <VideoPreview
               videoUrl={videoUrl}
               isMuted={isMuted}
@@ -649,6 +727,7 @@ export default function EditorPage() {
               onRefreshVoiceover={handleRefreshVoiceover}
               videoRef={videoRef}
               isProcessedVideo={isProcessedVideo}
+              zoomConfig={zoomConfig}
             />
           </div>
         </div>
@@ -674,6 +753,10 @@ export default function EditorPage() {
           onTimeChange={handleTimeChange}
           onPlayPause={handlePlayPause}
           isPlaying={isPlaying}
+          zoomConfig={zoomConfig}
+          onZoomChange={handleZoomChange}
+          onApplyZoom={handleApplyZoom}
+          isApplyingZoom={isApplyingZoom}
         />
       )}
       </div>

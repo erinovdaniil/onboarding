@@ -1,8 +1,9 @@
 'use client'
 
 import { useState, useRef, useEffect } from 'react'
-import { Play, Pause, Maximize, Plus } from 'lucide-react'
+import { Play, Pause, Maximize, Plus, ZoomIn, RefreshCw } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import ZoomBlock, { ZoomConfig } from './ZoomBlock'
 
 interface VideoTimelineProps {
   duration: number // in seconds
@@ -10,6 +11,10 @@ interface VideoTimelineProps {
   onTimeChange: (time: number) => void
   onPlayPause: () => void
   isPlaying: boolean
+  zoomConfig?: ZoomConfig | null
+  onZoomChange?: (zoom: ZoomConfig | null) => void
+  onApplyZoom?: () => void
+  isApplyingZoom?: boolean
 }
 
 export default function VideoTimeline({
@@ -18,6 +23,10 @@ export default function VideoTimeline({
   onTimeChange,
   onPlayPause,
   isPlaying,
+  zoomConfig,
+  onZoomChange,
+  onApplyZoom,
+  isApplyingZoom,
 }: VideoTimelineProps) {
   const [isDragging, setIsDragging] = useState(false)
   const timelineRef = useRef<HTMLDivElement>(null)
@@ -39,11 +48,14 @@ export default function VideoTimeline({
 
   const progress = duration > 0 ? (currentTime / duration) * 100 : 0
 
-  // Generate time markers
-  const markers = []
-  const interval = duration > 15 ? 3 : 1
-  for (let i = 0; i <= duration; i += interval) {
-    markers.push(i)
+  // Generate time markers (with validation to prevent infinite loops)
+  const markers: number[] = []
+  const safeDuration = Number.isFinite(duration) && duration > 0 ? duration : 0
+  if (safeDuration > 0) {
+    const interval = safeDuration > 15 ? 3 : 1
+    for (let i = 0; i <= safeDuration; i += interval) {
+      markers.push(i)
+    }
   }
 
   return (
@@ -77,7 +89,7 @@ export default function VideoTimeline({
           {/* Time markers */}
           <div className="absolute inset-0 flex items-center">
             {markers.map((marker) => {
-              const position = (marker / duration) * 100
+              const position = safeDuration > 0 ? (marker / safeDuration) * 100 : 0
               return (
                 <div
                   key={marker}
@@ -98,6 +110,16 @@ export default function VideoTimeline({
             style={{ width: `${progress}%` }}
           />
 
+          {/* Zoom block */}
+          {zoomConfig && zoomConfig.enabled && onZoomChange && (
+            <ZoomBlock
+              zoom={zoomConfig}
+              duration={safeDuration}
+              onZoomChange={onZoomChange}
+              onDelete={() => onZoomChange(null)}
+            />
+          )}
+
           {/* Playhead */}
           <div
             className="absolute top-0 h-full w-0.5 bg-primary z-10"
@@ -113,11 +135,44 @@ export default function VideoTimeline({
             Add Clips from Script tab
           </Button>
           <div className="flex items-center gap-2">
+            {/* Add Zoom button - only show if no zoom effect exists */}
+            {onZoomChange && (!zoomConfig || !zoomConfig.enabled) && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="gap-2"
+                onClick={() => {
+                  // Create zoom at current playhead position
+                  const zoomDuration = Math.min(3, safeDuration - currentTime)
+                  onZoomChange({
+                    enabled: true,
+                    startTime: currentTime,
+                    endTime: currentTime + zoomDuration,
+                    zoomLevel: 1.5,
+                    centerX: 50,  // Default to center
+                    centerY: 50,
+                  })
+                }}
+              >
+                <ZoomIn className="w-4 h-4" />
+                Add Zoom
+              </Button>
+            )}
+            {/* Apply Zoom button - show when zoom exists */}
+            {zoomConfig && zoomConfig.enabled && onApplyZoom && (
+              <Button
+                variant="default"
+                size="sm"
+                className="gap-2"
+                onClick={onApplyZoom}
+                disabled={isApplyingZoom}
+              >
+                <RefreshCw className={`w-4 h-4 ${isApplyingZoom ? 'animate-spin' : ''}`} />
+                {isApplyingZoom ? 'Applying...' : 'Apply Zoom'}
+              </Button>
+            )}
             <Button variant="ghost" size="icon" className="h-8 w-8">
               <Maximize className="w-4 h-4" />
-            </Button>
-            <Button variant="ghost" size="icon" className="h-8 w-8">
-              <Plus className="w-4 h-4" />
             </Button>
           </div>
         </div>

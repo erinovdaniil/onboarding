@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, RefObject } from 'react'
+import { useState, useEffect, RefObject } from 'react'
 import { ChevronUp, ChevronDown, Crop, Volume2, VolumeX, Subtitles, RefreshCw } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
@@ -11,6 +11,15 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 
+interface ZoomConfig {
+  enabled: boolean
+  startTime: number
+  endTime: number
+  zoomLevel: number
+  centerX?: number
+  centerY?: number
+}
+
 interface VideoPreviewProps {
   videoUrl: string | null
   isMuted: boolean
@@ -18,6 +27,7 @@ interface VideoPreviewProps {
   onRefreshVoiceover: () => void
   videoRef?: RefObject<HTMLVideoElement>
   isProcessedVideo?: boolean
+  zoomConfig?: ZoomConfig | null
 }
 
 export default function VideoPreview({
@@ -27,8 +37,59 @@ export default function VideoPreview({
   onRefreshVoiceover,
   videoRef,
   isProcessedVideo = false,
+  zoomConfig,
 }: VideoPreviewProps) {
   const [aspectRatio, setAspectRatio] = useState('wide')
+  const [currentZoom, setCurrentZoom] = useState(1)
+  const [zoomOrigin, setZoomOrigin] = useState({ x: 50, y: 50 })
+
+  // Apply real-time zoom effect based on video currentTime
+  useEffect(() => {
+    if (!videoRef?.current || !zoomConfig?.enabled) {
+      setCurrentZoom(1)
+      return
+    }
+
+    const video = videoRef.current
+    const transitionDuration = 0.3 // seconds for smooth transition
+
+    const updateZoom = () => {
+      const time = video.currentTime
+      const { startTime, endTime, zoomLevel, centerX = 50, centerY = 50 } = zoomConfig
+
+      let zoom = 1
+      if (time >= startTime && time <= endTime) {
+        // Calculate zoom with smooth transitions
+        const zoomInEnd = startTime + transitionDuration
+        const zoomOutStart = endTime - transitionDuration
+
+        if (time < zoomInEnd) {
+          // Zooming in
+          const progress = (time - startTime) / transitionDuration
+          zoom = 1 + (zoomLevel - 1) * Math.min(progress, 1)
+        } else if (time > zoomOutStart) {
+          // Zooming out
+          const progress = (time - zoomOutStart) / transitionDuration
+          zoom = zoomLevel - (zoomLevel - 1) * Math.min(progress, 1)
+        } else {
+          // Fully zoomed
+          zoom = zoomLevel
+        }
+
+        setZoomOrigin({ x: centerX, y: centerY })
+      }
+
+      setCurrentZoom(zoom)
+    }
+
+    video.addEventListener('timeupdate', updateZoom)
+    video.addEventListener('seeked', updateZoom)
+
+    return () => {
+      video.removeEventListener('timeupdate', updateZoom)
+      video.removeEventListener('seeked', updateZoom)
+    }
+  }, [videoRef, zoomConfig])
 
   return (
     <div className="flex-1 flex flex-col bg-card">
@@ -93,7 +154,13 @@ export default function VideoPreview({
               src={videoUrl}
               controls
               muted={isMuted}
-              className="max-w-full max-h-full"
+              crossOrigin="anonymous"
+              className="w-full h-full object-contain"
+              style={{
+                transform: `scale(${currentZoom})`,
+                transformOrigin: `${zoomOrigin.x}% ${zoomOrigin.y}%`,
+                transition: 'transform 0.1s ease-out',
+              }}
             />
             {/* Watermark */}
             <div className="absolute bottom-4 left-1/2 transform -translate-x-1/2 text-white/50 text-xs pointer-events-none">

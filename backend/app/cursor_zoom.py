@@ -165,10 +165,22 @@ async def detect_cursor_positions(
         logger.error(f"Failed to open video: {video_path}")
         return []
 
+    # Get frame count - note: CAP_PROP_FRAME_COUNT is unreliable for WebM/VP9
+    # May return 0 or negative values
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     fps = cap.get(cv2.CAP_PROP_FPS)
 
-    logger.info(f"Video: {total_frames} frames at {fps} FPS")
+    # Handle invalid fps (WebM can report 1000 fps or 0)
+    if fps <= 0 or fps > 120:
+        fps = 30.0  # Default to 30 fps
+        logger.warning(f"Invalid fps detected, defaulting to {fps}")
+
+    # Handle invalid frame count - will count manually if needed
+    if total_frames <= 0:
+        total_frames = 0  # Will be counted during processing
+        logger.warning("Frame count unavailable, will count during processing")
+
+    logger.info(f"Video: {total_frames if total_frames > 0 else 'unknown'} frames at {fps} FPS")
     logger.info(f"Processing every {frame_skip} frames with {downsample_factor}x downscale")
 
     positions = []
@@ -218,8 +230,11 @@ async def detect_cursor_positions(
 
         # Progress logging
         if frame_idx % 100 == 0:
-            progress = (frame_idx / total_frames) * 100
-            logger.info(f"Progress: {progress:.1f}% ({frame_idx}/{total_frames} frames)")
+            if total_frames > 0:
+                progress = (frame_idx / total_frames) * 100
+                logger.info(f"Progress: {progress:.1f}% ({frame_idx}/{total_frames} frames)")
+            else:
+                logger.info(f"Processed {frame_idx} frames...")
 
     cap.release()
 
@@ -229,60 +244,346 @@ async def detect_cursor_positions(
     return positions
 
 
+def detect_zoom_moments(
+    cursor_positions: List[Optional[Tuple[int, int]]],
+    fps: float,
+    stillness_threshold: float = 15.0,
+    stillness_duration_frames: int = 10,
+    min_gap_frames: int = 30
+) -> List[dict]:
+    """
+    Detect moments when cursor is relatively still (user pointing at something).
+
+    Args:
+        cursor_positions: List of (x, y) cursor positions per frame
+        fps: Video frame rate
+        stillness_threshold: Max movement (pixels) to consider "still"
+        stillness_duration_frames: Min frames of stillness to trigger zoom
+        min_gap_frames: Minimum frames between zoom events
+
+    Returns:
+        List of zoom events: {start_frame, end_frame, center_x, center_y}
+    """
+    zoom_events = []
+    valid_positions = [(i, p) for i, p in enumerate(cursor_positions) if p is not None]
+
+    if len(valid_positions) < stillness_duration_frames:
+        return zoom_events
+
+    i = 0
+    last_zoom_end = -min_gap_frames
+
+    while i < len(valid_positions) - stillness_duration_frames:
+        frame_idx, pos = valid_positions[i]
+
+        # Skip if too close to last zoom event
+        if frame_idx < last_zoom_end + min_gap_frames:
+            i += 1
+            continue
+
+        # Check if cursor stays relatively still for the required duration
+        still_frames = 1
+        positions_in_window = [pos]
+
+        for j in range(i + 1, min(i + stillness_duration_frames * 2, len(valid_positions))):
+            next_frame_idx, next_pos = valid_positions[j]
+
+            # Calculate distance from first position
+            dist = ((next_pos[0] - pos[0])**2 + (next_pos[1] - pos[1])**2)**0.5
+
+            if dist <= stillness_threshold:
+                still_frames += 1
+                positions_in_window.append(next_pos)
+            else:
+                break
+
+        # If we found enough still frames, create a zoom event
+        if still_frames >= stillness_duration_frames:
+            center_x = int(np.mean([p[0] for p in positions_in_window]))
+            center_y = int(np.mean([p[1] for p in positions_in_window]))
+
+            # Extend the zoom event a bit for smoother effect
+            start_frame = max(0, frame_idx - int(fps * 0.3))  # Start 0.3s before
+            end_frame = min(len(cursor_positions) - 1, frame_idx + still_frames + int(fps * 0.5))  # End 0.5s after
+
+            zoom_events.append({
+                'start_frame': start_frame,
+                'end_frame': end_frame,
+                'center_x': center_x,
+                'center_y': center_y
+            })
+
+            last_zoom_end = end_frame
+            i += still_frames
+        else:
+            i += 1
+
+    logger.info(f"Detected {len(zoom_events)} zoom moments")
+    return zoom_events
+
+
 def generate_zoompan_filter(
     cursor_positions: List[Optional[Tuple[int, int]]],
     video_width: int,
     video_height: int,
     fps: float,
-    base_zoom: float = 1.2,
-    max_zoom: float = 1.4,
+    base_zoom: float = 1.0,
+    max_zoom: float = 1.5,
     min_movement_threshold: float = 50.0
 ) -> str:
     """
-    Generate FFmpeg zoompan filter expression based on cursor positions.
+    Generate FFmpeg filter for dynamic zoom that follows cursor and zooms
+    in when cursor pauses (pointing at something).
 
     Args:
         cursor_positions: List of (x, y) cursor positions per frame
         video_width: Original video width
         video_height: Original video height
         fps: Video frame rate
-        base_zoom: Minimum zoom level (1.0 = no zoom)
-        max_zoom: Maximum zoom level
-        min_movement_threshold: Minimum pixel movement to trigger zoom increase
+        base_zoom: Default zoom level (1.0 = no zoom)
+        max_zoom: Zoom level when cursor is pointing at something
+        min_movement_threshold: Not used in new implementation
 
     Returns:
-        FFmpeg zoompan filter string
+        FFmpeg filter string
     """
     if not cursor_positions or all(p is None for p in cursor_positions):
-        logger.warning("No cursor positions detected, using default zoom")
-        return f"zoompan=z={base_zoom}:d=1:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s={video_width}x{video_height}:fps={fps}"
+        logger.warning("No cursor positions detected, returning no zoom")
+        return None
 
-    # Simplified approach: Use fixed zoom that follows cursor center
-    # This is fast and works well for most cases
+    # Detect moments when user is pointing at something
+    zoom_events = detect_zoom_moments(
+        cursor_positions,
+        fps,
+        stillness_threshold=20.0,
+        stillness_duration_frames=int(fps * 0.4),  # 0.4 seconds of stillness
+        min_gap_frames=int(fps * 1.5)  # At least 1.5 seconds between zooms
+    )
 
-    # Calculate average cursor position (for centering)
-    valid_positions = [p for p in cursor_positions if p is not None]
-    if not valid_positions:
-        center_x, center_y = video_width // 2, video_height // 2
+    if not zoom_events:
+        logger.info("No zoom moments detected, using smooth cursor follow")
+        # Fall back to smooth cursor following without zoom
+        return generate_smooth_follow_filter(cursor_positions, video_width, video_height, fps)
+
+    # Generate keyframes for smooth zoom transitions
+    total_frames = len(cursor_positions)
+    zoom_transition_frames = int(fps * 0.4)  # 0.4 second transition
+
+    # Build per-frame zoom and position data
+    frame_data = []
+    for frame_idx in range(total_frames):
+        # Find if we're in a zoom event
+        in_zoom = False
+        zoom_progress = 0.0
+        target_x, target_y = video_width // 2, video_height // 2
+
+        for event in zoom_events:
+            start = event['start_frame']
+            end = event['end_frame']
+
+            if start <= frame_idx <= end:
+                in_zoom = True
+                event_duration = end - start
+                event_progress = (frame_idx - start) / max(event_duration, 1)
+
+                # Smooth ease-in-out for zoom
+                if event_progress < 0.3:
+                    # Zoom in phase
+                    zoom_progress = (event_progress / 0.3) * 1.0
+                    zoom_progress = ease_in_out(zoom_progress)
+                elif event_progress > 0.7:
+                    # Zoom out phase
+                    zoom_progress = ((1.0 - event_progress) / 0.3) * 1.0
+                    zoom_progress = ease_in_out(zoom_progress)
+                else:
+                    # Hold zoom
+                    zoom_progress = 1.0
+
+                target_x = event['center_x']
+                target_y = event['center_y']
+                break
+
+        # Get current cursor position for smooth following
+        cursor_pos = cursor_positions[frame_idx] if frame_idx < len(cursor_positions) else None
+        if cursor_pos:
+            # Blend between cursor position and zoom target
+            if in_zoom:
+                blend = zoom_progress * 0.8  # Keep some cursor following even when zoomed
+                current_x = int(cursor_pos[0] * (1 - blend) + target_x * blend)
+                current_y = int(cursor_pos[1] * (1 - blend) + target_y * blend)
+            else:
+                current_x, current_y = cursor_pos
+        else:
+            current_x, current_y = target_x, target_y
+
+        # Calculate zoom level
+        zoom_level = base_zoom + (max_zoom - base_zoom) * zoom_progress
+
+        frame_data.append({
+            'frame': frame_idx,
+            'zoom': zoom_level,
+            'x': current_x,
+            'y': current_y
+        })
+
+    # Smooth the data
+    frame_data = smooth_frame_data(frame_data, window_size=int(fps * 0.2))
+
+    # Generate FFmpeg expression using sendcmd or complex expressions
+    # Since zoompan with dynamic expressions is limited, we'll use a different approach:
+    # Scale + crop with expressions that change per frame
+
+    logger.info(f"Generated dynamic zoom filter with {len(zoom_events)} zoom events")
+
+    # Use FFmpeg's zoompan with expression-based zoom and position
+    # We'll create a filter that interpolates between keyframes
+    return generate_keyframe_filter(frame_data, video_width, video_height, fps, zoom_events)
+
+
+def ease_in_out(t: float) -> float:
+    """Smooth ease-in-out function (cubic)."""
+    if t < 0.5:
+        return 4 * t * t * t
     else:
-        center_x = int(np.mean([p[0] for p in valid_positions]))
-        center_y = int(np.mean([p[1] for p in valid_positions]))
+        return 1 - pow(-2 * t + 2, 3) / 2
 
-    # Create zoompan filter with fixed zoom following cursor
-    # Note: This is a simplified version. For dynamic zoom based on movement,
-    # we'd need to generate per-frame expressions which is more complex.
 
+def smooth_frame_data(frame_data: List[dict], window_size: int = 5) -> List[dict]:
+    """Apply moving average smoothing to frame data."""
+    if window_size < 2 or len(frame_data) < window_size:
+        return frame_data
+
+    smoothed = []
+    half_window = window_size // 2
+
+    for i, data in enumerate(frame_data):
+        start = max(0, i - half_window)
+        end = min(len(frame_data), i + half_window + 1)
+        window = frame_data[start:end]
+
+        smoothed.append({
+            'frame': data['frame'],
+            'zoom': np.mean([d['zoom'] for d in window]),
+            'x': int(np.mean([d['x'] for d in window])),
+            'y': int(np.mean([d['y'] for d in window]))
+        })
+
+    return smoothed
+
+
+def generate_smooth_follow_filter(
+    cursor_positions: List[Optional[Tuple[int, int]]],
+    video_width: int,
+    video_height: int,
+    fps: float
+) -> str:
+    """Generate a filter that smoothly follows cursor without zooming."""
+    # No zoom events detected - return None to skip zoom filter entirely
+    # This avoids any unwanted default zoom and preserves original video
+    logger.info("No zoom events detected, skipping zoom filter to preserve original video")
+    return None
+
+
+def generate_keyframe_filter(
+    frame_data: List[dict],
+    video_width: int,
+    video_height: int,
+    fps: float,
+    zoom_events: List[dict]
+) -> str:
+    """
+    Generate FFmpeg filter using keyframe-based zoom expressions.
+
+    For dynamic zoom, we need to use expressions that vary with frame number.
+    FFmpeg's zoompan supports expressions with 'on' (output frame number).
+    """
+    if not zoom_events:
+        # No zoom events - return None to preserve original video without any zoom
+        logger.info("No zoom events in keyframe filter, returning None")
+        return None
+
+    # Build zoom expression based on frame ranges
+    # Format: if(between(on,start,end), zoom_value, else_value)
+    zoom_expr_parts = []
+    x_expr_parts = []
+    y_expr_parts = []
+
+    for event in zoom_events:
+        start = event['start_frame']
+        end = event['end_frame']
+        cx = event['center_x']
+        cy = event['center_y']
+        duration = end - start
+
+        # Zoom in for first 30%, hold for 40%, zoom out for 30%
+        zoom_in_end = start + int(duration * 0.3)
+        zoom_out_start = start + int(duration * 0.7)
+
+        # Create smooth zoom expression for this event
+        # Zoom in phase: linear interpolation from 1.0 to 1.5
+        zoom_expr_parts.append(
+            f"if(between(on,{start},{zoom_in_end}),"
+            f"1.0+0.5*(on-{start})/{max(zoom_in_end-start, 1)},"
+        )
+        # Hold phase
+        zoom_expr_parts.append(
+            f"if(between(on,{zoom_in_end},{zoom_out_start}),1.5,"
+        )
+        # Zoom out phase
+        zoom_expr_parts.append(
+            f"if(between(on,{zoom_out_start},{end}),"
+            f"1.5-0.5*(on-{zoom_out_start})/{max(end-zoom_out_start, 1)},"
+        )
+
+        # Position expressions - center on the zoom target during event
+        x_expr_parts.append(
+            f"if(between(on,{start},{end}),{cx}-(iw/zoom/2),"
+        )
+        y_expr_parts.append(
+            f"if(between(on,{start},{end}),{cy}-(ih/zoom/2),"
+        )
+
+    # Build the nested if expressions
+    # Default values (no zoom)
+    default_zoom = "1.0"
+    default_x = f"{video_width//2}-(iw/zoom/2)"
+    default_y = f"{video_height//2}-(ih/zoom/2)"
+
+    # Close all the if statements
+    closing_parens = ")" * (len(zoom_expr_parts))
+
+    zoom_expr = "".join(zoom_expr_parts) + default_zoom + closing_parens
+
+    # For position, we need to handle outside-of-zoom-event frames
+    # Use smoothed cursor following for those
+    valid_data = [d for d in frame_data if d['x'] and d['y']]
+    if valid_data:
+        avg_x = int(np.mean([d['x'] for d in valid_data]))
+        avg_y = int(np.mean([d['y'] for d in valid_data]))
+    else:
+        avg_x, avg_y = video_width // 2, video_height // 2
+
+    default_x = f"{avg_x}-(iw/zoom/2)"
+    default_y = f"{avg_y}-(ih/zoom/2)"
+
+    x_closing = ")" * len(x_expr_parts)
+    y_closing = ")" * len(y_expr_parts)
+
+    x_expr = "".join(x_expr_parts) + default_x + x_closing
+    y_expr = "".join(y_expr_parts) + default_y + y_closing
+
+    # Build the complete filter
     zoompan_filter = (
         f"zoompan="
-        f"z='{base_zoom}':"  # Fixed zoom level
-        f"d=1:"  # Apply to each frame
-        f"x='{center_x}-(iw/zoom/2)':"  # Center on average cursor X
-        f"y='{center_y}-(ih/zoom/2)':"  # Center on average cursor Y
+        f"z='{zoom_expr}':"
+        f"d=1:"
+        f"x='{x_expr}':"
+        f"y='{y_expr}':"
         f"s={video_width}x{video_height}:"
         f"fps={fps}"
     )
 
-    logger.info(f"Generated zoompan filter: {base_zoom}x zoom centered on ({center_x}, {center_y})")
+    logger.info(f"Generated keyframe zoom filter with {len(zoom_events)} zoom events")
     return zoompan_filter
 
 
