@@ -94,28 +94,39 @@ async def extract_audio(video_path: Path, audio_path: Path) -> bool:
 async def transcribe_audio(audio_path: Path) -> Optional[dict]:
     """
     Transcribe audio using OpenAI Whisper API.
-    Returns transcript with segments and timestamps.
+    Returns transcript with word-level timestamps for precise voiceover sync.
     """
     if not openai_client:
         return None
-    
+
     try:
         with open(audio_path, "rb") as audio_file:
             transcript = openai_client.audio.transcriptions.create(
                 model="whisper-1",
                 file=audio_file,
                 response_format="verbose_json",
-                timestamp_granularities=["segment"]
+                timestamp_granularities=["word", "segment"]  # Get both word and segment level
             )
-        
+
         # Convert to dict format
         transcript_data = {
             "text": transcript.text,
             "language": getattr(transcript, "language", "en"),
-            "segments": []
+            "segments": [],
+            "words": []  # Store word-level timestamps for precise sync
         }
-        
-        # Extract segments if available
+
+        # Extract word-level timestamps (more precise for voiceover sync)
+        if hasattr(transcript, "words") and transcript.words:
+            for word in transcript.words:
+                transcript_data["words"].append({
+                    "word": word.word,
+                    "start": word.start,
+                    "end": word.end
+                })
+            logger.info(f"Got {len(transcript_data['words'])} word-level timestamps")
+
+        # Extract segments as fallback
         if hasattr(transcript, "segments") and transcript.segments:
             for segment in transcript.segments:
                 transcript_data["segments"].append({
@@ -124,7 +135,8 @@ async def transcribe_audio(audio_path: Path) -> Optional[dict]:
                     "end": segment.end,
                     "text": segment.text
                 })
-        
+            logger.info(f"Got {len(transcript_data['segments'])} segments")
+
         return transcript_data
     except Exception as e:
         print(f"Transcription error: {e}")

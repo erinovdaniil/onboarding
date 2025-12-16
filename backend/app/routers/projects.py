@@ -85,14 +85,32 @@ async def get_project(project_id: str, authorization: Optional[str] = Header(Non
                     project["videoUrl"] = file_url or project.get("video_url")
                 elif video_file["file_type"] == "processed":
                     project["processedVideoUrl"] = file_url
+                elif video_file["file_type"] == "audio":
+                    project["voiceoverUrl"] = file_url
 
-        # Get transcript
+        # Get transcript with word-level timestamps
         transcript_record = await get_transcript(project_id)
         if transcript_record:
+            # Parse JSON strings if needed
+            segments = transcript_record.get("segments", [])
+            if isinstance(segments, str):
+                try:
+                    segments = json.loads(segments)
+                except json.JSONDecodeError:
+                    segments = []
+
+            words = transcript_record.get("words", [])
+            if isinstance(words, str):
+                try:
+                    words = json.loads(words)
+                except json.JSONDecodeError:
+                    words = []
+
             project["transcript"] = {
                 "text": transcript_record.get("text", ""),
                 "language": transcript_record.get("language", "en"),
-                "segments": transcript_record.get("segments", [])
+                "segments": segments,
+                "words": words  # Include word-level timestamps for TranscriptEditor
             }
         
         return project

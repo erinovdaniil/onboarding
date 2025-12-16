@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, RefObject } from 'react'
+import { useState, useEffect, useRef, RefObject } from 'react'
 import { ChevronUp, ChevronDown, Crop, Volume2, VolumeX, Subtitles, RefreshCw } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
@@ -22,6 +22,7 @@ interface ZoomConfig {
 
 interface VideoPreviewProps {
   videoUrl: string | null
+  voiceoverUrl?: string | null
   isMuted: boolean
   onMuteToggle: () => void
   onRefreshVoiceover: () => void
@@ -32,6 +33,7 @@ interface VideoPreviewProps {
 
 export default function VideoPreview({
   videoUrl,
+  voiceoverUrl,
   isMuted,
   onMuteToggle,
   onRefreshVoiceover,
@@ -42,6 +44,73 @@ export default function VideoPreview({
   const [aspectRatio, setAspectRatio] = useState('wide')
   const [currentZoom, setCurrentZoom] = useState(1)
   const [zoomOrigin, setZoomOrigin] = useState({ x: 50, y: 50 })
+  const audioRef = useRef<HTMLAudioElement>(null)
+
+  // Keep video element muted when voiceover exists (prevent native controls from unmuting)
+  useEffect(() => {
+    if (!videoRef?.current) return
+    const video = videoRef.current
+
+    // Only force mute if voiceover exists
+    if (!voiceoverUrl) return
+
+    // Force mute on any volume change attempt when voiceover is active
+    const forceMute = () => {
+      if (!video.muted) {
+        video.muted = true
+      }
+    }
+
+    video.addEventListener('volumechange', forceMute)
+    return () => video.removeEventListener('volumechange', forceMute)
+  }, [videoRef, voiceoverUrl])
+
+  // Sync voiceover audio with video playback
+  // Pause effects are now baked into the voiceover audio file itself
+  useEffect(() => {
+    if (!videoRef?.current || !audioRef.current || !voiceoverUrl) return
+
+    const video = videoRef.current
+    const audio = audioRef.current
+
+    const syncAudio = () => {
+      // Keep audio in sync with video
+      if (!video.paused) {
+        // Only sync if audio is not playing or drifted too much
+        if (audio.paused) {
+          audio.currentTime = video.currentTime
+          audio.play().catch(() => {})
+        } else if (Math.abs(video.currentTime - audio.currentTime) > 0.5) {
+          audio.currentTime = video.currentTime
+        }
+      }
+    }
+
+    const handlePlay = () => {
+      audio.currentTime = video.currentTime
+      audio.play().catch(() => {})
+    }
+
+    const handlePause = () => {
+      audio.pause()
+    }
+
+    const handleSeeked = () => {
+      audio.currentTime = video.currentTime
+    }
+
+    video.addEventListener('play', handlePlay)
+    video.addEventListener('pause', handlePause)
+    video.addEventListener('seeked', handleSeeked)
+    video.addEventListener('timeupdate', syncAudio)
+
+    return () => {
+      video.removeEventListener('play', handlePlay)
+      video.removeEventListener('pause', handlePause)
+      video.removeEventListener('seeked', handleSeeked)
+      video.removeEventListener('timeupdate', syncAudio)
+    }
+  }, [videoRef, voiceoverUrl])
 
   // Apply real-time zoom effect based on video currentTime
   useEffect(() => {
@@ -153,7 +222,7 @@ export default function VideoPreview({
               ref={videoRef}
               src={videoUrl}
               controls
-              muted={isMuted}
+              muted={!!voiceoverUrl || isMuted}
               crossOrigin="anonymous"
               className="w-full h-full object-contain"
               style={{
@@ -162,6 +231,15 @@ export default function VideoPreview({
                 transition: 'transform 0.1s ease-out',
               }}
             />
+            {/* Audio element for voiceover only */}
+            {voiceoverUrl && (
+              <audio
+                ref={audioRef}
+                src={voiceoverUrl}
+                muted={isMuted}
+                crossOrigin="anonymous"
+              />
+            )}
             {/* Watermark */}
             <div className="absolute bottom-4 left-1/2 transform -translate-x-1/2 text-white/50 text-xs pointer-events-none">
               Made with Trupeer.ai

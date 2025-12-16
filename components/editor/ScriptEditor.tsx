@@ -7,6 +7,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Textarea } from '@/components/ui/textarea'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Label } from '@/components/ui/label'
+import TranscriptEditor, { TranscriptPhrase } from './TranscriptEditor'
 
 interface ScriptEditorProps {
   script: string
@@ -25,6 +26,12 @@ interface ScriptEditorProps {
   selectedVoice?: string
   onVoiceChange?: (voice: string) => void
   projectId?: string
+  transcriptPhrases?: TranscriptPhrase[]
+  onTranscriptPhrasesChange?: (phrases: TranscriptPhrase[]) => void
+  currentTime?: number
+  onSeekToTime?: (time: number) => void
+  onRetranscribe?: () => Promise<void>
+  hasTranscriptText?: boolean
 }
 
 const languages = [
@@ -86,8 +93,14 @@ export default function ScriptEditor({
   selectedVoice = 'alloy',
   onVoiceChange,
   projectId,
+  transcriptPhrases = [],
+  onTranscriptPhrasesChange,
+  currentTime = 0,
+  onSeekToTime,
+  onRetranscribe,
+  hasTranscriptText = false,
 }: ScriptEditorProps) {
-  const [activeTab, setActiveTab] = useState('script')
+  const [activeTab, setActiveTab] = useState('transcript')
   const [avatarId, setAvatarId] = useState('default')
   const [avatarPosition, setAvatarPosition] = useState('bottom-right')
   const [avatarSize, setAvatarSize] = useState('medium')
@@ -110,15 +123,26 @@ export default function ScriptEditor({
       <Tabs value={activeTab} onValueChange={setActiveTab} className="flex-1 flex flex-col">
         <div className="border-b px-4">
           <TabsList className="w-full justify-start">
+            <TabsTrigger value="transcript" className="text-xs">Transcript</TabsTrigger>
             <TabsTrigger value="script" className="text-xs">Script</TabsTrigger>
             <TabsTrigger value="ai-voice" className="text-xs">AI Voice</TabsTrigger>
-            <TabsTrigger value="music" className="text-xs">Music</TabsTrigger>
-            <TabsTrigger value="visuals" className="text-xs">Visuals</TabsTrigger>
-            <TabsTrigger value="zooms" className="text-xs">Zooms</TabsTrigger>
             <TabsTrigger value="ai-avatar" className="text-xs">AI Avatar</TabsTrigger>
-            <TabsTrigger value="elements" className="text-xs">Elements</TabsTrigger>
           </TabsList>
         </div>
+
+        {/* Transcript Tab */}
+        <TabsContent value="transcript" className="flex-1 flex flex-col m-0 p-0 overflow-hidden">
+          <TranscriptEditor
+            phrases={transcriptPhrases}
+            onPhrasesChange={onTranscriptPhrasesChange || (() => {})}
+            currentTime={currentTime}
+            onSeekToTime={onSeekToTime || (() => {})}
+            disabled={isProcessing}
+            projectId={projectId}
+            onRetranscribe={onRetranscribe}
+            hasTranscriptText={hasTranscriptText}
+          />
+        </TabsContent>
 
         {/* Script Tab */}
         <TabsContent value="script" className="flex-1 flex flex-col m-0 p-0">
@@ -286,17 +310,8 @@ export default function ScriptEditor({
           </div>
         </TabsContent>
 
-        {/* Placeholder tabs */}
-        <TabsContent value="music" className="flex-1 p-4">
-          <p className="text-sm text-muted-foreground">Music library coming soon...</p>
-        </TabsContent>
-        <TabsContent value="visuals" className="flex-1 p-4">
-          <p className="text-sm text-muted-foreground">Visual effects coming soon...</p>
-        </TabsContent>
-        <TabsContent value="zooms" className="flex-1 p-4">
-          <p className="text-sm text-muted-foreground">Zoom controls coming soon...</p>
-        </TabsContent>
-        <TabsContent value="ai-avatar" className="flex-1 p-4 space-y-4">
+        {/* AI Avatar Tab */}
+        <TabsContent value="ai-avatar" className="flex-1 p-4 space-y-4 overflow-y-auto">
           <div className="space-y-4">
             <div className="space-y-2">
               <Label>Enable AI Avatar</Label>
@@ -389,9 +404,6 @@ export default function ScriptEditor({
               <p>Avatar will be composited onto your video during processing. Make sure you have a script generated before creating the avatar.</p>
             </div>
           </div>
-        </TabsContent>
-        <TabsContent value="elements" className="flex-1 p-4">
-          <p className="text-sm text-muted-foreground">Elements library coming soon...</p>
         </TabsContent>
       </Tabs>
     </div>

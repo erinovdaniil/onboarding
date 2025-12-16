@@ -107,6 +107,7 @@ async def delete_project(project_id: str, user_id: Optional[str] = None) -> bool
 async def save_transcript(project_id: str, transcript_data: Dict[str, Any]) -> bool:
     """
     Save transcript data for a project.
+    Includes word-level timestamps for precise voiceover sync.
     """
     try:
         import json
@@ -117,17 +118,21 @@ async def save_transcript(project_id: str, transcript_data: Dict[str, Any]) -> b
             "segments": json.dumps(transcript_data.get("segments", [])),  # Store as JSON string for JSONB
             "created_at": datetime.utcnow().isoformat(),
         }
-        
+
+        # Add word-level timestamps if available
+        if transcript_data.get("words"):
+            transcript_record["words"] = json.dumps(transcript_data.get("words", []))
+
         # Check if transcript already exists
         existing = supabase.table("transcripts").select("*").eq("project_id", project_id).execute()
-        
+
         if existing.data and len(existing.data) > 0:
             # Update existing
             supabase.table("transcripts").update(transcript_record).eq("project_id", project_id).execute()
         else:
             # Insert new
             supabase.table("transcripts").insert(transcript_record).execute()
-        
+
         return True
     except Exception as e:
         print(f"Error saving transcript: {e}")

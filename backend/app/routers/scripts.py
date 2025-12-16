@@ -3,6 +3,7 @@ from pydantic import BaseModel
 from openai import OpenAI
 import os
 import json
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -14,10 +15,46 @@ openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY")) if os.getenv("OPENAI
 # Get upload directory
 UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "../public/uploads"))
 
+# Filler words to remove (keeps timing sync with video)
+FILLER_WORDS = [
+    r'\bum\b', r'\bumm\b', r'\bummm\b',
+    r'\buh\b', r'\buhh\b', r'\buhhh\b',
+    r'\bhmm\b', r'\bhm\b', r'\bhmm+\b',
+    r'\bah\b', r'\bahh\b',
+    r'\ber\b', r'\berr\b',
+    r'\blike\b(?=,|\s+,)',  # "like," filler usage
+    r'\byou know\b(?=,|\s+,)',  # "you know," filler usage
+    r'^so,?\s+',  # "so" at start of sentence
+    r'\bso,\s+',  # "so," as filler mid-sentence
+]
+
+
+def remove_filler_words(text: str) -> str:
+    """
+    Remove only filler words from transcript while keeping the rest identical.
+    This preserves timing sync with the video.
+    """
+    result = text
+
+    for pattern in FILLER_WORDS:
+        # Case insensitive removal
+        result = re.sub(pattern, '', result, flags=re.IGNORECASE)
+
+    # Clean up extra whitespace and punctuation artifacts
+    result = re.sub(r'\s+', ' ', result)  # Multiple spaces to single
+    result = re.sub(r'\s+,', ',', result)  # Space before comma
+    result = re.sub(r',\s*,', ',', result)  # Double commas
+    result = re.sub(r'^\s*,\s*', '', result)  # Leading comma
+    result = re.sub(r'\s+\.', '.', result)  # Space before period
+    result = result.strip()
+
+    return result
+
 
 class ScriptRequest(BaseModel):
     projectId: str
     transcript: Optional[str] = None
+    useAI: bool = False  # If true, use AI to rewrite (may break sync). Default: only remove fillers
 
 
 class TranslateRequest(BaseModel):
@@ -28,76 +65,82 @@ class TranslateRequest(BaseModel):
 @router.post("/generate")
 async def generate_script(request: ScriptRequest):
     """
-    Generate a polished script from video transcript or create one from scratch.
-    Uses actual transcript if available, otherwise generates a sample script.
+    Generate a cleaned script from video transcript.
+    By default, only removes filler words to keep sync with video.
+    Set cleanOnly=False to use AI for full rewriting (may break sync).
     """
-    if not openai_client:
-        raise HTTPException(
-            status_code=500,
-            detail="OpenAI API key not configured"
-        )
-
     try:
         # Try to get transcript from project
         transcript_text = request.transcript
         if not transcript_text:
             project_dir = UPLOAD_DIR / request.projectId
             transcript_path = project_dir / "transcript.json"
-            
+
             if transcript_path.exists():
                 with open(transcript_path, "r") as f:
                     transcript_data = json.load(f)
                     transcript_text = transcript_data.get("text", "")
 
-        # If we have a transcript, refine it using GPT
+        # If we have a transcript, clean it
         if transcript_text:
-            completion = openai_client.chat.completions.create(
-                model="gpt-4",
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are a professional video script writer. "
-                            "Create a polished, engaging script based on the provided transcript. "
-                            "Remove filler words, improve clarity, and make it professional. "
-                            "Keep the original meaning and flow, but enhance the language."
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": (
-                            f"Refine and polish the following transcript into a professional script:\n\n{transcript_text}"
-                        ),
-                    },
-                ],
-                max_tokens=2000,
-            )
-            script = completion.choices[0].message.content or transcript_text
+            # Default: Just remove filler words to preserve video sync
+            script = remove_filler_words(transcript_text)
+
+            # Only use AI rewriting if explicitly requested AND OpenAI is configured
+            if request.useAI and openai_client:
+                # AI rewriting - note: this may break video sync!
+                try:
+                    completion = openai_client.chat.completions.create(
+                        model="gpt-4",
+                        messages=[
+                            {
+                                "role": "system",
+                                "content": (
+                                    "You are a professional video script writer. "
+                                    "Create a polished, engaging script based on the provided transcript. "
+                                    "Remove filler words, improve clarity, and make it professional. "
+                                    "Keep the original meaning and flow, but enhance the language."
+                                ),
+                            },
+                            {
+                                "role": "user",
+                                "content": (
+                                    f"Refine and polish the following transcript into a professional script:\n\n{transcript_text}"
+                                ),
+                            },
+                        ],
+                        max_tokens=2000,
+                    )
+                    script = completion.choices[0].message.content or script
+                except Exception as ai_error:
+                    # Fall back to simple cleaning if AI fails
+                    print(f"AI script generation failed, using simple cleaning: {ai_error}")
         else:
-            # Generate a sample script if no transcript available
-            completion = openai_client.chat.completions.create(
-                model="gpt-4",
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are a professional video script writer. "
-                            "Create a polished, engaging script based on screen recording content. "
-                            "Remove filler words, improve clarity, and make it professional."
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": (
-                            "Generate a professional script for a screen recording video. "
-                            "Make it clear, concise, and engaging. "
-                            "Remove any filler words and improve the flow."
-                        ),
-                    },
-                ],
-                max_tokens=1000,
-            )
-            script = completion.choices[0].message.content or ""
+            # No transcript - return empty or generate sample
+            if openai_client and request.useAI:
+                completion = openai_client.chat.completions.create(
+                    model="gpt-4",
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "You are a professional video script writer. "
+                                "Create a polished, engaging script for a screen recording tutorial."
+                            ),
+                        },
+                        {
+                            "role": "user",
+                            "content": (
+                                "Generate a short professional script for a screen recording video tutorial. "
+                                "Make it clear and concise."
+                            ),
+                        },
+                    ],
+                    max_tokens=1000,
+                )
+                script = completion.choices[0].message.content or ""
+            else:
+                script = ""
 
         return {"script": script, "projectId": request.projectId}
 

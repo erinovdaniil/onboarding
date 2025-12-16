@@ -18,12 +18,17 @@ async def upload_file_to_storage(
     Returns the public URL of the uploaded file.
     """
     try:
+        # Delete existing file first (to handle upsert)
+        try:
+            supabase.storage.from_(bucket_name).remove([file_path])
+        except Exception:
+            pass  # File might not exist, that's fine
+
         # Upload file to Supabase Storage
-        # The upload method returns a response object
         result = supabase.storage.from_(bucket_name).upload(
             file_path,
             file_content,
-            file_options={"contentType": content_type or "application/octet-stream", "upsert": "true"}
+            file_options={"contentType": content_type or "application/octet-stream"}
         )
         
         # Get public URL

@@ -9,6 +9,7 @@ import VideoTimeline from '@/components/editor/VideoTimeline'
 import DocumentView from '@/components/editor/DocumentView'
 import { VideoStep } from '@/components/editor/StepEditor'
 import { ZoomConfig } from '@/components/editor/ZoomBlock'
+import { TranscriptPhrase } from '@/components/editor/TranscriptEditor'
 import { Loader2 } from 'lucide-react'
 import EditorLayout from '@/components/layouts/EditorLayout'
 import { captureVideoFrame, captureFrameFromUrl, generateMockSteps } from '@/lib/videoUtils'
@@ -24,6 +25,7 @@ export default function EditorPage() {
   const [activeTab, setActiveTab] = useState<'video' | 'document'>('video')
   const [script, setScript] = useState('')
   const [videoUrl, setVideoUrl] = useState<string | null>(null)
+  const [voiceoverUrl, setVoiceoverUrl] = useState<string | null>(null)
   const [isProcessedVideo, setIsProcessedVideo] = useState(false)
   const [isMuted, setIsMuted] = useState(false)
   const [isPlaying, setIsPlaying] = useState(false)
@@ -37,6 +39,7 @@ export default function EditorPage() {
   const [transcript, setTranscript] = useState<any>(null)
   const [zoomConfig, setZoomConfig] = useState<ZoomConfig | null>(null)
   const [isApplyingZoom, setIsApplyingZoom] = useState(false)
+  const [transcriptPhrases, setTranscriptPhrases] = useState<TranscriptPhrase[]>([])
   const stepsCreatedFromTranscriptRef = useRef(false)
   const isSeekingRef = useRef(false) // Track if user is manually seeking
 
@@ -70,13 +73,13 @@ export default function EditorPage() {
   // seek the video on every timeupdate, creating a feedback loop.
   // Instead, we only seek in handleTimeChange when user explicitly changes time.
 
-  // Generate mock steps when video duration is available (only if no transcript available)
+  // Generate mock steps when video duration is available (only if no transcript phrases available)
   useEffect(() => {
     const generateSteps = async () => {
       const video = videoRef.current
       if (!video || !duration || duration === 0) return
-      // Don't generate mock steps if transcript exists or steps already created
-      if (transcript || steps.length > 0 || stepsCreatedFromTranscriptRef.current) return
+      // Don't generate mock steps if transcript phrases exist or steps already created
+      if (transcriptPhrases.length > 0 || steps.length > 0 || stepsCreatedFromTranscriptRef.current) return
 
       // Generate mock steps based on video duration
       const mockSteps = generateMockSteps(duration)
@@ -104,7 +107,7 @@ export default function EditorPage() {
     }
 
     generateSteps()
-  }, [duration, transcript, steps.length])
+  }, [duration, transcriptPhrases.length, steps.length])
 
   const resolveVideoUrl = (url: string | null) => {
     if (!url) return null
@@ -182,17 +185,26 @@ export default function EditorPage() {
         setProject(data)
         const hasProcessedVideo = !!data.processedVideoUrl
         setVideoUrl(resolveVideoUrl(data.processedVideoUrl || data.videoUrl || null))
+        setVoiceoverUrl(data.voiceoverUrl ? resolveVideoUrl(data.voiceoverUrl) : null)
         setIsProcessedVideo(hasProcessedVideo)
         setScript(data.script || '')
         
-        // Load transcript if available
+        // Load transcript if available from project data
         if (data.transcript) {
           setTranscript(data.transcript)
           if (data.transcript.text) {
             setScript(data.transcript.text)
           }
+          // Load word-level timestamps from project data if available
+          if (data.transcript.words && data.transcript.words.length > 0) {
+            const words = typeof data.transcript.words === 'string'
+              ? JSON.parse(data.transcript.words)
+              : data.transcript.words
+            const phrases = groupWordsIntoPhrases(words)
+            setTranscriptPhrases(phrases)
+          }
         } else {
-          // Try to fetch transcript separately
+          // Only fetch transcript separately if not in project data
           loadTranscript()
         }
 
@@ -223,6 +235,61 @@ export default function EditorPage() {
     }
   }
 
+  // Group words into phrases based on pauses (matching backend logic)
+  const groupWordsIntoPhrases = (words: any[], pauseThreshold = 0.25): TranscriptPhrase[] => {
+    if (!words || words.length === 0) return []
+
+    const phrases: TranscriptPhrase[] = []
+    let currentPhrase = {
+      id: 'phrase-0',
+      text: '',
+      start: words[0]?.start || 0,
+      end: words[0]?.end || 0,
+      words: [] as string[]
+    }
+
+    for (let i = 0; i < words.length; i++) {
+      const word = words[i]
+      const wordText = (word.word || '').trim()
+      const wordStart = word.start || 0
+      const wordEnd = word.end || 0
+
+      if (!wordText) continue
+
+      // Check for gap from previous word
+      if (i > 0 && currentPhrase.words.length > 0) {
+        const gap = wordStart - currentPhrase.end
+        if (gap >= pauseThreshold) {
+          // Save current phrase and start new one
+          currentPhrase.text = currentPhrase.words.join(' ').trim()
+          if (currentPhrase.text) {
+            phrases.push({ ...currentPhrase })
+          }
+          currentPhrase = {
+            id: `phrase-${phrases.length}`,
+            text: '',
+            start: wordStart,
+            end: wordEnd,
+            words: []
+          }
+        }
+      }
+
+      currentPhrase.words.push(wordText)
+      currentPhrase.end = wordEnd
+    }
+
+    // Don't forget last phrase
+    if (currentPhrase.words.length > 0) {
+      currentPhrase.text = currentPhrase.words.join(' ').trim()
+      if (currentPhrase.text) {
+        phrases.push({ ...currentPhrase })
+      }
+    }
+
+    return phrases
+  }
+
   const loadTranscript = async () => {
     try {
       const response = await fetch(`/api/transcripts/${projectId}`)
@@ -232,6 +299,15 @@ export default function EditorPage() {
           setTranscript(data.transcript)
           if (data.transcript.text && !script) {
             setScript(data.transcript.text)
+          }
+
+          // Load word-level timestamps and convert to phrases
+          if (data.transcript.words && data.transcript.words.length > 0) {
+            const words = typeof data.transcript.words === 'string'
+              ? JSON.parse(data.transcript.words)
+              : data.transcript.words
+            const phrases = groupWordsIntoPhrases(words)
+            setTranscriptPhrases(phrases)
           }
         }
       }
@@ -254,88 +330,66 @@ export default function EditorPage() {
     }
   }
 
-  // Create steps from transcript segments when video is loaded and transcript is available
+  // Create steps from transcript phrases (word-level timestamps)
   useEffect(() => {
-    const createStepsFromTranscript = async () => {
-      if (!transcript || !duration || duration === 0) return
+    const createStepsFromPhrases = async () => {
+      if (!transcriptPhrases || transcriptPhrases.length === 0) return
+      if (!duration || duration === 0) return
       if (!videoRef.current) return
-      
+
       // Check if steps already created from transcript
       if (stepsCreatedFromTranscriptRef.current) return
 
-      try {
-        // Segment the transcript
-        const segmentResponse = await fetch('/api/transcripts/segment', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            projectId,
-            segmentDuration: 7.0,
-          }),
-        })
+      // Mark as created
+      stepsCreatedFromTranscriptRef.current = true
 
-        if (!segmentResponse.ok) return
+      // Create steps directly from transcript phrases
+      const newSteps: VideoStep[] = transcriptPhrases.map((phrase, index) => ({
+        id: phrase.id || `step-${index}`,
+        startTime: phrase.start,
+        endTime: phrase.end,
+        title: `Step ${index + 1}`,
+        transcript: phrase.text,
+        screenshot: undefined,
+      }))
 
-        const segmentData = await segmentResponse.json()
-        const segments = segmentData.segments || []
+      // Set steps without screenshots first
+      setSteps(newSteps)
 
-        if (segments.length === 0) return
+      // Capture screenshots for each step asynchronously
+      const currentVideoUrl = videoRef.current?.src
+      if (!currentVideoUrl) return
 
-        // Mark as created
-        stepsCreatedFromTranscriptRef.current = true
+      for (const step of newSteps) {
+        try {
+          setCapturingStepIds(prev => [...prev, step.id])
+          // Capture at the start of the phrase for better context
+          const captureTime = step.startTime
 
-        // Create steps from segments (use AI-generated title from backend)
-        const newSteps: VideoStep[] = segments.map((seg: any, index: number) => ({
-          id: seg.id || `step-${index}`,
-          startTime: seg.startTime || 0,
-          endTime: seg.endTime || Math.min(seg.startTime + 10, duration),
-          title: seg.title || `Step ${index + 1}`,  // Use backend-generated title
-          transcript: seg.transcript || seg.text || '',
-          screenshot: undefined,
-        }))
-
-        // Set steps without screenshots first
-        setSteps(newSteps)
-
-        // Capture screenshots for each step asynchronously
-        // Capture at middle of step for better representation
-        // Use URL-based capture to avoid CORS issues
-        const currentVideoUrl = videoRef.current?.src
-        if (!currentVideoUrl) return
-
-        for (const step of newSteps) {
+          // Try URL-based capture first (handles CORS better)
+          let screenshot: string
           try {
-            setCapturingStepIds(prev => [...prev, step.id])
-            // Capture at middle of step instead of start
-            const middleTime = (step.startTime + step.endTime) / 2
-
-            // Try URL-based capture first (handles CORS better)
-            let screenshot: string
-            try {
-              screenshot = await captureFrameFromUrl(currentVideoUrl, middleTime)
-            } catch (urlError) {
-              console.warn('URL capture failed, trying video ref:', urlError)
-              screenshot = await captureVideoFrame(videoRef.current!, middleTime)
-            }
-
-            setSteps(prevSteps =>
-              prevSteps.map(s =>
-                s.id === step.id ? { ...s, screenshot } : s
-              )
-            )
-          } catch (error) {
-            console.error(`Failed to capture screenshot for ${step.id}:`, error)
-          } finally {
-            setCapturingStepIds(prev => prev.filter(id => id !== step.id))
+            screenshot = await captureFrameFromUrl(currentVideoUrl, captureTime)
+          } catch (urlError) {
+            console.warn('URL capture failed, trying video ref:', urlError)
+            screenshot = await captureVideoFrame(videoRef.current!, captureTime)
           }
+
+          setSteps(prevSteps =>
+            prevSteps.map(s =>
+              s.id === step.id ? { ...s, screenshot } : s
+            )
+          )
+        } catch (error) {
+          console.error(`Failed to capture screenshot for ${step.id}:`, error)
+        } finally {
+          setCapturingStepIds(prev => prev.filter(id => id !== step.id))
         }
-      } catch (error) {
-        console.error('Error creating steps from transcript:', error)
       }
     }
 
-    createStepsFromTranscript()
-  }, [transcript, duration, projectId])
+    createStepsFromPhrases()
+  }, [transcriptPhrases, duration])
 
   const handleExport = async () => {
     if (!projectId) return
@@ -367,14 +421,40 @@ export default function EditorPage() {
     }
     setIsProcessing(true)
     try {
+      // Step 1: Generate cleaned script from transcript
+      const transcriptText = typeof transcript === 'string' ? transcript : transcript?.text || ''
       const response = await fetch('/api/generate-script', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ projectId }),
+        body: JSON.stringify({ projectId, transcript: transcriptText }),
       })
       if (!response.ok) throw new Error('Failed to generate script')
       const data = await response.json()
-      setScript(data.script || '')
+      const newScript = data.script || ''
+      setScript(newScript)
+
+      // Step 2: Regenerate voiceover with the new script (including pause effects)
+      if (newScript) {
+        const voiceoverResponse = await fetch('/api/generate-voiceover', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            projectId,
+            script: newScript,
+            voice: selectedVoice,
+            videoDuration: duration > 0 ? duration : undefined,
+          }),
+        })
+        if (voiceoverResponse.ok) {
+          const voiceoverData = await voiceoverResponse.json()
+          if (voiceoverData.audioUrl) {
+            // Add cache-busting to force reload
+            setVoiceoverUrl(voiceoverData.audioUrl + '?t=' + Date.now())
+          }
+        } else {
+          console.warn('Failed to regenerate voiceover')
+        }
+      }
     } catch (error) {
       console.error('Error generating script:', error)
       alert('Failed to generate script')
@@ -420,9 +500,14 @@ export default function EditorPage() {
           projectId,
           script,
           voice: selectedVoice,
+          videoDuration: duration > 0 ? duration : undefined,
         }),
       })
       if (!response.ok) throw new Error('Failed to generate voiceover')
+      const data = await response.json()
+      if (data.audioUrl) {
+        setVoiceoverUrl(data.audioUrl + '?t=' + Date.now())
+      }
       alert('Voiceover generated successfully!')
     } catch (error) {
       console.error('Error generating voiceover:', error)
@@ -470,6 +555,30 @@ export default function EditorPage() {
 
   const handleRefreshVoiceover = () => {
     handleGenerateVoiceover()
+  }
+
+  const handleRetranscribe = async () => {
+    if (!projectId || projectId.startsWith('placeholder-')) return
+    try {
+      const response = await fetch('/api/transcripts/retranscribe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ projectId }),
+      })
+      if (!response.ok) throw new Error('Failed to retranscribe')
+      const data = await response.json()
+      if (data.transcript) {
+        setTranscript(data.transcript)
+        // Load the new word-level timestamps
+        if (data.transcript.words && data.transcript.words.length > 0) {
+          const phrases = groupWordsIntoPhrases(data.transcript.words)
+          setTranscriptPhrases(phrases)
+        }
+      }
+    } catch (error) {
+      console.error('Error retranscribing:', error)
+      alert('Failed to retranscribe video')
+    }
   }
 
   const handleGenerateAvatar = async (config: { avatarId: string; position: string; size: string }) => {
@@ -715,6 +824,12 @@ export default function EditorPage() {
               selectedVoice={selectedVoice}
               onVoiceChange={setSelectedVoice}
               projectId={projectId}
+              transcriptPhrases={transcriptPhrases}
+              onTranscriptPhrasesChange={setTranscriptPhrases}
+              currentTime={currentTime}
+              onSeekToTime={handleTimeChange}
+              onRetranscribe={handleRetranscribe}
+              hasTranscriptText={!!transcript?.text}
             />
           </div>
 
@@ -722,6 +837,7 @@ export default function EditorPage() {
           <div className="flex-1 flex flex-col">
             <VideoPreview
               videoUrl={videoUrl}
+              voiceoverUrl={voiceoverUrl}
               isMuted={isMuted}
               onMuteToggle={() => setIsMuted(!isMuted)}
               onRefreshVoiceover={handleRefreshVoiceover}
