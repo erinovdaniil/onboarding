@@ -11,7 +11,7 @@ import logging
 from typing import List, Dict, Optional
 from openai import OpenAI
 
-from app.database import get_transcript as db_get_transcript, save_transcript, get_project
+from app.database import get_transcript as db_get_transcript, save_transcript, get_project, get_cleaned_transcript as db_get_cleaned_transcript, save_cleaned_transcript
 from app.storage import download_file_from_storage
 
 logger = logging.getLogger(__name__)
@@ -29,6 +29,18 @@ class SegmentTranscriptRequest(BaseModel):
     segmentDuration: float = 10.0  # Target segment duration (flexible)
     minDuration: float = 5.0  # Minimum segment duration
     maxDuration: float = 20.0  # Maximum segment duration
+
+
+class TranscriptSegmentUpdate(BaseModel):
+    id: str
+    start: float
+    end: float
+    text: str
+
+
+class UpdateTranscriptRequest(BaseModel):
+    projectId: str
+    segments: List[TranscriptSegmentUpdate]
 
 
 def find_sentence_boundaries(text: str) -> List[int]:
@@ -125,35 +137,74 @@ def smart_segment_whisper_segments(
 async def get_transcript(project_id: str):
     """
     Get transcript for a project from Supabase database.
+    Returns cleaned transcript if available, otherwise original.
     """
     try:
-        # Get transcript from database
-        transcript_record = await db_get_transcript(project_id)
+        # First, try to get cleaned transcript (improved text with original timestamps)
+        cleaned_record = await db_get_cleaned_transcript(project_id)
+        logger.info(f"Cleaned transcript for {project_id}: {cleaned_record is not None}")
 
-        if not transcript_record:
+        # Get original transcript for metadata (language, original words)
+        transcript_record = await db_get_transcript(project_id)
+        logger.info(f"Original transcript for {project_id}: {transcript_record is not None}")
+
+        if not transcript_record and not cleaned_record:
             return {"transcript": None, "message": "No transcript available"}
 
-        # Parse segments if stored as JSON string
-        segments = transcript_record.get("segments", [])
-        if isinstance(segments, str):
-            try:
-                segments = json.loads(segments)
-            except json.JSONDecodeError:
-                segments = []
+        # Parse original segments if stored as JSON string
+        original_segments = []
+        if transcript_record:
+            original_segments = transcript_record.get("segments", [])
+            if isinstance(original_segments, str):
+                try:
+                    original_segments = json.loads(original_segments)
+                except json.JSONDecodeError:
+                    original_segments = []
 
-        # Parse words if stored as JSON string
-        words = transcript_record.get("words", [])
-        if isinstance(words, str):
-            try:
-                words = json.loads(words)
-            except json.JSONDecodeError:
-                words = []
+        # Parse original words if stored as JSON string
+        original_words = []
+        if transcript_record:
+            original_words = transcript_record.get("words", [])
+            if isinstance(original_words, str):
+                try:
+                    original_words = json.loads(original_words)
+                except json.JSONDecodeError:
+                    original_words = []
+
+        # If cleaned transcript exists, convert to words format for display
+        words_for_display = original_words
+        if cleaned_record:
+            cleaned_segments = cleaned_record.get("segments", [])
+            if isinstance(cleaned_segments, str):
+                try:
+                    cleaned_segments = json.loads(cleaned_segments)
+                except json.JSONDecodeError:
+                    cleaned_segments = []
+
+            # Convert cleaned segments to a format the frontend can display
+            # Each segment has: id, start, end, original_text, cleaned_text, voiceover_start, voiceover_end
+            if cleaned_segments:
+                words_for_display = []
+                for seg in cleaned_segments:
+                    # Use voiceover timestamps if available, otherwise fall back to original
+                    start_time = seg.get("voiceover_start", seg.get("start", 0))
+                    end_time = seg.get("voiceover_end", seg.get("end", 0))
+
+                    words_for_display.append({
+                        "word": seg.get("cleaned_text", seg.get("original_text", "")),
+                        "start": start_time,
+                        "end": end_time,
+                        "original_start": seg.get("start", 0),  # Keep original for reference
+                        "original_end": seg.get("end", 0),
+                        "is_cleaned_segment": True  # Flag to indicate this is a full segment
+                    })
 
         transcript = {
-            "text": transcript_record.get("text", ""),
-            "language": transcript_record.get("language", "en"),
-            "segments": segments,
-            "words": words
+            "text": cleaned_record.get("full_cleaned_text", "") if cleaned_record else (transcript_record.get("text", "") if transcript_record else ""),
+            "language": transcript_record.get("language", "en") if transcript_record else "en",
+            "segments": original_segments,
+            "words": words_for_display,
+            "has_cleaned_transcript": cleaned_record is not None
         }
 
         return {"transcript": transcript}
@@ -417,6 +468,69 @@ async def segment_transcript(request: SegmentTranscriptRequest):
         raise HTTPException(
             status_code=500,
             detail=f"Failed to segment transcript: {str(e)}"
+        )
+
+
+@router.put("/update")
+async def update_transcript(request: UpdateTranscriptRequest):
+    """
+    Update cleaned transcript segments with user edits.
+    This allows users to manually edit the transcript text before regenerating voiceover.
+    """
+    try:
+        logger.info(f"Updating transcript for project {request.projectId} with {len(request.segments)} segments")
+
+        # Get existing cleaned transcript to preserve original text
+        existing = await db_get_cleaned_transcript(request.projectId)
+
+        if existing:
+            existing_segments = existing.get("segments", [])
+            if isinstance(existing_segments, str):
+                existing_segments = json.loads(existing_segments)
+
+            # Create a map of existing segments by id for quick lookup
+            existing_map = {str(seg.get("id", i)): seg for i, seg in enumerate(existing_segments)}
+        else:
+            existing_map = {}
+
+        # Build updated segments
+        updated_segments = []
+        for seg in request.segments:
+            # Get original text from existing segment if available
+            existing_seg = existing_map.get(seg.id, {})
+            original_text = existing_seg.get("original_text", seg.text)
+
+            updated_segments.append({
+                "id": seg.id,
+                "start": seg.start,
+                "end": seg.end,
+                "original_text": original_text,
+                "cleaned_text": seg.text,  # User edited text becomes the cleaned text
+                "voiceover_start": seg.start,
+                "voiceover_end": seg.end,
+            })
+
+        # Combine into full text
+        full_cleaned_text = " ".join(seg["cleaned_text"] for seg in updated_segments)
+
+        # Save to database
+        await save_cleaned_transcript(request.projectId, updated_segments, full_cleaned_text)
+
+        logger.info(f"Transcript updated successfully for project {request.projectId}")
+
+        return {
+            "success": True,
+            "message": "Transcript updated successfully",
+            "segmentCount": len(updated_segments)
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to update transcript: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to update transcript: {str(e)}"
         )
 
 

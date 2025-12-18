@@ -13,6 +13,7 @@ import { TranscriptPhrase } from '@/components/editor/TranscriptEditor'
 import { Loader2 } from 'lucide-react'
 import EditorLayout from '@/components/layouts/EditorLayout'
 import { captureVideoFrame, captureFrameFromUrl, generateMockSteps } from '@/lib/videoUtils'
+import { authenticatedFetch } from '@/lib/api'
 
 export default function EditorPage() {
   const params = useParams()
@@ -178,8 +179,8 @@ export default function EditorPage() {
         return
       }
 
-      // Normal project fetching logic
-      const response = await fetch(`/api/projects/${projectId}`)
+      // Normal project fetching logic - use authenticated fetch
+      const response = await authenticatedFetch(`/api/projects/${projectId}`)
       if (response.ok) {
         const data = await response.json()
         setProject(data)
@@ -188,25 +189,10 @@ export default function EditorPage() {
         setVoiceoverUrl(data.voiceoverUrl ? resolveVideoUrl(data.voiceoverUrl) : null)
         setIsProcessedVideo(hasProcessedVideo)
         setScript(data.script || '')
-        
-        // Load transcript if available from project data
-        if (data.transcript) {
-          setTranscript(data.transcript)
-          if (data.transcript.text) {
-            setScript(data.transcript.text)
-          }
-          // Load word-level timestamps from project data if available
-          if (data.transcript.words && data.transcript.words.length > 0) {
-            const words = typeof data.transcript.words === 'string'
-              ? JSON.parse(data.transcript.words)
-              : data.transcript.words
-            const phrases = groupWordsIntoPhrases(words)
-            setTranscriptPhrases(phrases)
-          }
-        } else {
-          // Only fetch transcript separately if not in project data
-          loadTranscript()
-        }
+
+        // Always fetch transcript from API to get cleaned version if available
+        // The transcript API returns cleaned text with original timestamps when processing is complete
+        loadTranscript()
 
         // Load zoom config if available
         if (data.zoom_config) {
@@ -216,7 +202,7 @@ export default function EditorPage() {
         }
       } else {
         // Fallback: try to get from projects list
-        const projectsResponse = await fetch('/api/projects')
+        const projectsResponse = await authenticatedFetch('/api/projects')
         const projectsData = await projectsResponse.json()
         const foundProject = projectsData.projects?.find((p: any) => p.id === projectId)
         if (foundProject) {
@@ -236,9 +222,24 @@ export default function EditorPage() {
   }
 
   // Group words into phrases based on pauses (matching backend logic)
+  // Also handles cleaned transcript format where each "word" is actually a full segment
   const groupWordsIntoPhrases = (words: any[], pauseThreshold = 0.25): TranscriptPhrase[] => {
     if (!words || words.length === 0) return []
 
+    // Check if this is cleaned transcript format (segments, not individual words)
+    const isCleanedFormat = words.some(w => w.is_cleaned_segment)
+
+    if (isCleanedFormat) {
+      // Cleaned transcript: each entry is a full segment with improved text
+      return words.map((seg, index) => ({
+        id: seg.id || `phrase-${index}`,
+        text: seg.word || '',  // In cleaned format, 'word' contains the full segment text
+        start: seg.start || 0,
+        end: seg.end || 0
+      })).filter(p => p.text.trim())
+    }
+
+    // Original word-level format: group into phrases based on pauses
     const phrases: TranscriptPhrase[] = []
     let currentPhrase = {
       id: 'phrase-0',
@@ -760,6 +761,28 @@ export default function EditorPage() {
     }
   }, [projectId, zoomConfig])
 
+  const handleTitleChange = useCallback(async (newTitle: string) => {
+    if (!projectId || projectId.startsWith('placeholder-')) return
+
+    try {
+      const response = await authenticatedFetch(`/api/projects/${projectId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: newTitle }),
+      })
+
+      if (response.ok) {
+        const updatedProject = await response.json()
+        setProject((prev: any) => ({ ...prev, name: newTitle }))
+      } else {
+        alert('Failed to update project name')
+      }
+    } catch (error) {
+      console.error('Error updating project name:', error)
+      alert('Failed to update project name')
+    }
+  }, [projectId])
+
   const formatTime = (seconds: number) => {
     const mins = Math.floor(seconds / 60)
     const secs = Math.floor(seconds % 60)
@@ -801,6 +824,7 @@ export default function EditorPage() {
           onExport={handleExport}
           activeTab={activeTab}
           onTabChange={setActiveTab}
+          onTitleChange={handleTitleChange}
         />
 
       {activeTab === 'video' ? (

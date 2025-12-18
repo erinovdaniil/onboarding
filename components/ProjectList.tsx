@@ -63,20 +63,7 @@ export default function ProjectList({ onSelectProject, searchQuery = '' }: Proje
     try {
       const response = await authenticatedFetch('/api/projects')
       const data = await response.json()
-
-      // Create placeholder project
-      const placeholderProject = {
-        id: 'placeholder-1',
-        name: 'Sample Video',
-        createdAt: new Date().toISOString(),
-        thumbnailUrl: null,
-        videoUrl: null,
-        language: 'English',
-        script: '',
-      }
-
-      // Inject placeholder at the beginning of the projects array
-      setProjects([placeholderProject, ...(data.projects || [])])
+      setProjects(data.projects || [])
     } catch (error) {
       console.error('Error fetching projects:', error)
     } finally {
@@ -94,10 +81,12 @@ export default function ProjectList({ onSelectProject, searchQuery = '' }: Proje
     )
   }, [projects, searchQuery])
 
-  const formatDate = (dateString: string) => {
+  const formatDate = (dateString: string | null | undefined) => {
+    if (!dateString) return 'Unknown date'
     const date = new Date(dateString)
+    if (isNaN(date.getTime())) return 'Unknown date'
     const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
-    const months = ['January', 'February', 'March', 'April', 'May', 'June', 
+    const months = ['January', 'February', 'March', 'April', 'May', 'June',
                     'July', 'August', 'September', 'October', 'November', 'December']
     return `${days[date.getDay()]}, ${months[date.getMonth()]} ${date.getDate()}`
   }
@@ -135,13 +124,23 @@ export default function ProjectList({ onSelectProject, searchQuery = '' }: Proje
 
   if (filteredProjects.length === 0) {
     return (
-      <div className="text-center py-12">
-        <h3 className="text-lg font-semibold mb-2">
+      <div className="flex flex-col items-center justify-center py-16 px-4">
+        <div className="w-24 h-24 bg-muted rounded-full flex items-center justify-center mb-6">
+          <span className="text-5xl">📹</span>
+        </div>
+        <h3 className="text-xl font-semibold mb-2 text-center">
           {searchQuery ? 'No projects found' : 'No projects yet'}
         </h3>
-        <p className="text-muted-foreground">
-          {searchQuery ? 'Try a different search term' : 'Start by recording a video!'}
+        <p className="text-muted-foreground text-center max-w-md mb-6">
+          {searchQuery
+            ? 'Try a different search term to find your projects'
+            : 'Get started by creating your first video project. Record or upload a video to begin.'}
         </p>
+        {!searchQuery && (
+          <div className="flex flex-col items-center gap-2 text-sm text-muted-foreground">
+            <p>Click "Create new" to get started</p>
+          </div>
+        )}
       </div>
     )
   }
@@ -168,9 +167,8 @@ export default function ProjectList({ onSelectProject, searchQuery = '' }: Proje
                   <span className="text-4xl">📹</span>
                 </div>
               )}
-              {/* Three-dot menu overlay (hidden for placeholder projects) */}
-              {!project.id.startsWith('placeholder-') && (
-                <div className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity">
+              {/* Three-dot menu overlay */}
+              <div className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity">
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild>
                       <Button
@@ -193,7 +191,6 @@ export default function ProjectList({ onSelectProject, searchQuery = '' }: Proje
                     </DropdownMenuContent>
                   </DropdownMenu>
                 </div>
-              )}
             </div>
             
             {/* Content Info */}

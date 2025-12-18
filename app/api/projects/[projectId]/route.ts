@@ -56,6 +56,44 @@ export async function GET(
   }
 }
 
+export async function PATCH(
+  request: NextRequest,
+  { params }: { params: { projectId: string } }
+) {
+  try {
+    const { projectId } = params
+    const authorization = request.headers.get('authorization')
+    const body = await request.json()
+
+    // Forward the request to Python backend
+    const response = await fetch(`${BACKEND_URL}/api/projects/${projectId}`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(authorization ? { 'Authorization': authorization } : {}),
+      },
+      body: JSON.stringify(body),
+    })
+
+    if (!response.ok) {
+      const error = await response.json()
+      return NextResponse.json(
+        { error: error.detail || 'Failed to update project' },
+        { status: response.status }
+      )
+    }
+
+    const data = await response.json()
+    return NextResponse.json(data)
+  } catch (error) {
+    console.error('Error updating project:', error)
+    return NextResponse.json(
+      { error: 'Failed to update project' },
+      { status: 500 }
+    )
+  }
+}
+
 export async function DELETE(
   request: NextRequest,
   { params }: { params: { projectId: string } }

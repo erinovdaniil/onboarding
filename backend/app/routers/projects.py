@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Header
+from fastapi import APIRouter, HTTPException, Header, Body
 from pathlib import Path
 import os
 import json
@@ -12,7 +12,7 @@ from app.database import (
     get_video_files
 )
 from app.storage import delete_file_from_storage
-from app.auth import optional_auth
+from app.auth import optional_auth, require_auth
 
 router = APIRouter()
 
@@ -23,21 +23,21 @@ STORAGE_BUCKET = os.getenv("SUPABASE_STORAGE_BUCKET", "videos")
 @router.get("/")
 async def list_projects(authorization: Optional[str] = Header(None)):
     """
-    List all video projects.
-    Optionally filtered by user if authorization header is provided.
+    List all video projects for the authenticated user.
+    Requires authentication - returns only user's own projects.
     """
     try:
-        # Extract user_id from JWT token if provided
-        user_id = optional_auth(authorization)
+        # Require authentication - user must be logged in
+        user_id = require_auth(authorization)
 
-        # Get projects from database
+        # Get projects from database (filtered by user_id)
         projects = await db_list_projects(user_id=user_id)
 
         # Get video files for each project to populate URLs
         from app.storage import get_file_url
         for project in projects:
             video_files = await get_video_files(project["id"])
-            
+
             # Find original and processed video URLs
             for video_file in video_files:
                 storage_path = video_file.get("storage_path")
@@ -47,6 +47,12 @@ async def list_projects(authorization: Optional[str] = Header(None)):
                         project["videoUrl"] = file_url or project.get("video_url")
                     elif video_file["file_type"] == "processed":
                         project["processedVideoUrl"] = file_url
+
+            # Transform snake_case to camelCase for frontend
+            if "created_at" in project:
+                project["createdAt"] = project["created_at"]
+            if "updated_at" in project:
+                project["updatedAt"] = project["updated_at"]
 
         return {"projects": projects}
 
@@ -61,10 +67,11 @@ async def list_projects(authorization: Optional[str] = Header(None)):
 async def get_project(project_id: str, authorization: Optional[str] = Header(None)):
     """
     Get a single project by ID.
+    Requires authentication - user can only access their own projects.
     """
     try:
-        # Extract user_id from JWT token if provided
-        user_id = optional_auth(authorization)
+        # Require authentication
+        user_id = require_auth(authorization)
 
         # Get project from database
         project = await db_get_project(project_id, user_id=user_id)
@@ -124,14 +131,52 @@ async def get_project(project_id: str, authorization: Optional[str] = Header(Non
         )
 
 
+@router.patch("/{project_id}")
+async def update_project(
+    project_id: str,
+    updates: Dict[str, Any] = Body(...),
+    authorization: Optional[str] = Header(None)
+):
+    """
+    Update a project's metadata (e.g., name).
+    Requires authentication - user can only update their own projects.
+    """
+    try:
+        # Require authentication
+        user_id = require_auth(authorization)
+
+        # Get project to verify ownership
+        project = await db_get_project(project_id, user_id=user_id)
+        if not project:
+            raise HTTPException(status_code=404, detail="Project not found")
+
+        # Update the project
+        from app.database import update_project as db_update_project
+        updated_project = await db_update_project(project_id, updates)
+
+        if not updated_project:
+            raise HTTPException(status_code=500, detail="Failed to update project")
+
+        return updated_project
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to update project: {str(e)}"
+        )
+
+
 @router.delete("/{project_id}")
 async def delete_project(project_id: str, authorization: Optional[str] = Header(None)):
     """
     Delete a project and all its files from database and storage.
+    Requires authentication - user can only delete their own projects.
     """
     try:
-        # Extract user_id from JWT token if provided
-        user_id = optional_auth(authorization)
+        # Require authentication
+        user_id = require_auth(authorization)
 
         # Get project to verify it exists
         project = await db_get_project(project_id, user_id=user_id)

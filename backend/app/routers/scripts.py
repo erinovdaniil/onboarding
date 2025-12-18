@@ -7,6 +7,8 @@ import re
 from pathlib import Path
 from typing import Optional
 
+from app.database import get_cleaned_transcript, get_transcript as db_get_transcript
+
 router = APIRouter()
 
 # Initialize OpenAI client
@@ -66,20 +68,53 @@ class TranslateRequest(BaseModel):
 async def generate_script(request: ScriptRequest):
     """
     Generate a cleaned script from video transcript.
-    By default, only removes filler words to keep sync with video.
-    Set cleanOnly=False to use AI for full rewriting (may break sync).
+
+    Priority:
+    1. Return cleaned transcript from database (already AI-improved)
+    2. Fall back to original transcript with filler word removal
+    3. Use AI rewriting only if explicitly requested
     """
     try:
-        # Try to get transcript from project
+        # First, check for cleaned transcript (preferred - already AI-improved)
+        cleaned_record = await get_cleaned_transcript(request.projectId)
+
+        if cleaned_record:
+            # Use the full cleaned text from the cleaned_transcripts table
+            full_cleaned = cleaned_record.get("full_cleaned_text", "")
+            if full_cleaned:
+                print(f"Using cleaned transcript for script generation")
+                return {"script": full_cleaned, "projectId": request.projectId}
+
+            # Fallback: construct from segments
+            segments = cleaned_record.get("segments", [])
+            if isinstance(segments, str):
+                try:
+                    segments = json.loads(segments)
+                except json.JSONDecodeError:
+                    segments = []
+
+            if segments:
+                cleaned_text = " ".join(seg.get("cleaned_text", "") for seg in segments)
+                if cleaned_text.strip():
+                    print(f"Constructed script from {len(segments)} cleaned segments")
+                    return {"script": cleaned_text.strip(), "projectId": request.projectId}
+
+        # Try to get transcript from database
         transcript_text = request.transcript
         if not transcript_text:
-            project_dir = UPLOAD_DIR / request.projectId
-            transcript_path = project_dir / "transcript.json"
+            transcript_record = await db_get_transcript(request.projectId)
+            if transcript_record:
+                transcript_text = transcript_record.get("text", "")
+                print(f"Using original transcript from database")
+            else:
+                # Legacy: try local file
+                project_dir = UPLOAD_DIR / request.projectId
+                transcript_path = project_dir / "transcript.json"
 
-            if transcript_path.exists():
-                with open(transcript_path, "r") as f:
-                    transcript_data = json.load(f)
-                    transcript_text = transcript_data.get("text", "")
+                if transcript_path.exists():
+                    with open(transcript_path, "r") as f:
+                        transcript_data = json.load(f)
+                        transcript_text = transcript_data.get("text", "")
 
         # If we have a transcript, clean it
         if transcript_text:

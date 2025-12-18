@@ -375,14 +375,43 @@ async def generate_voiceover(request: VoiceoverRequest):
 
         # Try auto-sync approach first if enabled
         if request.autoSync and request.videoDuration:
-            # Try to get transcript segments from database if not provided
+            import json
+            from app.pipeline import generate_segmented_voiceover
+
+            # First, check for CLEANED transcript (preferred - has improved text)
+            cleaned_record = await get_cleaned_transcript(request.projectId)
+
+            if cleaned_record:
+                # Use cleaned transcript segments for voiceover
+                cleaned_segments = cleaned_record.get("segments", [])
+                if isinstance(cleaned_segments, str):
+                    try:
+                        cleaned_segments = json.loads(cleaned_segments)
+                    except json.JSONDecodeError:
+                        cleaned_segments = []
+
+                if cleaned_segments:
+                    print(f"Using CLEANED transcript ({len(cleaned_segments)} segments) for voiceover")
+
+                    # Use the pipeline's time-synced voiceover generation
+                    audio_url = await generate_segmented_voiceover(
+                        request.projectId,
+                        cleaned_segments,
+                        request.voice or "alloy"
+                    )
+
+                    if audio_url:
+                        return {
+                            "success": True,
+                            "audioUrl": audio_url,
+                        }
+
+            # Fallback: Try to get original transcript segments
             segments = None
             if request.transcriptSegments:
                 segments = [s.dict() for s in request.transcriptSegments]
             else:
                 # Fetch transcript from database
-                import json
-
                 words = None
                 transcript_record = await get_transcript(request.projectId)
 
@@ -415,7 +444,7 @@ async def generate_voiceover(request: VoiceoverRequest):
 
             # Generate audio using word-level or segment-level timestamps
             if words or (segments and len(segments) > 1):
-                print(f"Using timing-based generation")
+                print(f"Using timing-based generation (original transcript)")
 
                 # Generate TTS for each phrase and place at original timestamps
                 audio_content = generate_segment_based_audio(

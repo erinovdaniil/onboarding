@@ -131,22 +131,25 @@ export default function ScriptEditor({
         </div>
 
         {/* Transcript Tab */}
-        <TabsContent value="transcript" className="flex-1 flex flex-col m-0 p-0 overflow-hidden">
-          <TranscriptEditor
-            phrases={transcriptPhrases}
-            onPhrasesChange={onTranscriptPhrasesChange || (() => {})}
-            currentTime={currentTime}
-            onSeekToTime={onSeekToTime || (() => {})}
-            disabled={isProcessing}
-            projectId={projectId}
-            onRetranscribe={onRetranscribe}
-            hasTranscriptText={hasTranscriptText}
-          />
+        <TabsContent value="transcript" className="m-0 p-0">
+          <div className="h-[calc(100vh-16rem)]">
+            <TranscriptEditor
+              phrases={transcriptPhrases}
+              onPhrasesChange={onTranscriptPhrasesChange || (() => {})}
+              currentTime={currentTime}
+              onSeekToTime={onSeekToTime || (() => {})}
+              disabled={isProcessing}
+              projectId={projectId}
+              onRetranscribe={onRetranscribe}
+              hasTranscriptText={hasTranscriptText}
+            />
+          </div>
         </TabsContent>
 
         {/* Script Tab */}
-        <TabsContent value="script" className="flex-1 flex flex-col m-0 p-0">
-          <div className="p-4 border-b space-y-3">
+        <TabsContent value="script" className="m-0 p-0">
+          <div className="h-[calc(100vh-16rem)] overflow-y-auto">
+            <div className="p-4 border-b space-y-3">
             <div className="flex items-center gap-2 flex-wrap">
               <Button 
                 size="sm" 
@@ -248,6 +251,7 @@ export default function ScriptEditor({
                 </Button>
               </div>
             )}
+            </div>
           </div>
         </TabsContent>
 

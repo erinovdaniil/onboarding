@@ -21,6 +21,7 @@ interface TranscriptEditorProps {
   projectId?: string
   onRetranscribe?: () => Promise<void>
   hasTranscriptText?: boolean
+  onTranscriptEdited?: () => void  // Called when transcript is saved after edit
 }
 
 function formatTime(seconds: number): string {
@@ -39,10 +40,13 @@ export default function TranscriptEditor({
   projectId,
   onRetranscribe,
   hasTranscriptText = false,
+  onTranscriptEdited,
 }: TranscriptEditorProps) {
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editText, setEditText] = useState('')
   const [isRetranscribing, setIsRetranscribing] = useState(false)
+  const [isSaving, setIsSaving] = useState(false)
+  const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false)
 
   // Find the currently active phrase based on video time
   const activePhrase = phrases.find(
@@ -58,6 +62,38 @@ export default function TranscriptEditor({
     setEditText(phrase.text)
   }
 
+  const saveTranscriptToBackend = async (updatedPhrases: TranscriptPhrase[]) => {
+    if (!projectId) return
+
+    setIsSaving(true)
+    try {
+      const response = await fetch('/api/transcripts/update', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          projectId,
+          segments: updatedPhrases.map(p => ({
+            id: p.id,
+            start: p.start,
+            end: p.end,
+            text: p.text,
+          })),
+        }),
+      })
+
+      if (response.ok) {
+        setHasUnsavedChanges(false)
+        onTranscriptEdited?.()
+      } else {
+        console.error('Failed to save transcript')
+      }
+    } catch (error) {
+      console.error('Error saving transcript:', error)
+    } finally {
+      setIsSaving(false)
+    }
+  }
+
   const handleEditSave = (id: string) => {
     const updatedPhrases = phrases.map((p) =>
       p.id === id ? { ...p, text: editText } : p
@@ -65,6 +101,10 @@ export default function TranscriptEditor({
     onPhrasesChange(updatedPhrases)
     setEditingId(null)
     setEditText('')
+    setHasUnsavedChanges(true)
+
+    // Auto-save to backend
+    saveTranscriptToBackend(updatedPhrases)
   }
 
   const handleEditCancel = () => {
@@ -207,8 +247,17 @@ export default function TranscriptEditor({
         })}
       </div>
 
-      <div className="px-3 py-2 border-t bg-muted/30 text-[10px] text-muted-foreground">
-        Double-click text to edit • Click timestamp to seek
+      <div className="px-3 py-2 border-t bg-muted/30 text-[10px] text-muted-foreground flex items-center justify-between">
+        <span>Double-click text to edit • Click timestamp to seek</span>
+        {isSaving && (
+          <span className="flex items-center gap-1 text-primary">
+            <Loader2 className="w-3 h-3 animate-spin" />
+            Saving...
+          </span>
+        )}
+        {!isSaving && hasUnsavedChanges && (
+          <span className="text-yellow-600">Unsaved changes</span>
+        )}
       </div>
     </div>
   )

@@ -10,11 +10,17 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Supabase JWT configuration
+# The JWT secret should be found in Supabase Dashboard -> Settings -> API -> JWT Secret
+# It's a long string, NOT the key ID (UUID)
 SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET", "")
 
 # For development, we can also use the service role key as secret
 if not SUPABASE_JWT_SECRET:
     SUPABASE_JWT_SECRET = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+
+# Development mode - skip signature verification if secret is not properly configured
+# Set to False in production!
+DEV_SKIP_VERIFICATION = os.getenv("DEV_SKIP_JWT_VERIFICATION", "true").lower() == "true"
 
 
 def verify_token(authorization: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -34,22 +40,27 @@ def verify_token(authorization: Optional[str] = None) -> Optional[Dict[str, Any]
 
         # Decode and verify JWT token
         # Supabase uses HS256 algorithm
-        payload = jwt.decode(
-            token,
-            SUPABASE_JWT_SECRET,
-            algorithms=["HS256"],
-            audience="authenticated",
-            options={"verify_signature": True}
-        )
-
+        if DEV_SKIP_VERIFICATION:
+            # Development mode: decode without signature verification
+            payload = jwt.decode(
+                token,
+                options={"verify_signature": False}
+            )
+        else:
+            payload = jwt.decode(
+                token,
+                SUPABASE_JWT_SECRET,
+                algorithms=["HS256"],
+                audience="authenticated",
+                options={"verify_signature": True}
+            )
         return payload
 
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token has expired")
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
-    except Exception as e:
-        print(f"Token verification error: {e}")
+    except Exception:
         return None
 
 

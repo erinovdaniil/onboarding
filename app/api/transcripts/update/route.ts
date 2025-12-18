@@ -2,25 +2,22 @@ import { NextRequest, NextResponse } from 'next/server'
 
 const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:8000'
 
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { projectId: string } }
-) {
+export async function PUT(request: NextRequest) {
   try {
-    const { projectId } = params
-    
-    // Forward the request to Python backend
-    const response = await fetch(`${BACKEND_URL}/api/avatar/config/${projectId}`, {
-      method: 'GET',
+    const body = await request.json()
+
+    const response = await fetch(`${BACKEND_URL}/api/transcripts/update`, {
+      method: 'PUT',
       headers: {
         'Content-Type': 'application/json',
       },
+      body: JSON.stringify(body),
     })
 
     if (!response.ok) {
       const error = await response.json()
       return NextResponse.json(
-        { error: error.detail || 'Failed to fetch avatar config' },
+        { error: error.detail || 'Failed to update transcript' },
         { status: response.status }
       )
     }
@@ -28,17 +25,10 @@ export async function GET(
     const data = await response.json()
     return NextResponse.json(data)
   } catch (error) {
-    console.error('Error fetching avatar config:', error)
+    console.error('Error updating transcript:', error)
     return NextResponse.json(
-      { error: 'Failed to fetch avatar config' },
+      { error: 'Failed to update transcript' },
       { status: 500 }
     )
   }
 }
-
-
-
-
-
-
-

@@ -161,7 +161,7 @@ export default function VideoPreview({
   }, [videoRef, zoomConfig])
 
   return (
-    <div className="flex-1 flex flex-col bg-card">
+    <div className="flex flex-col bg-card">
       {/* Controls */}
       <div className="border-b p-3 flex items-center justify-between gap-2 bg-background">
         <div className="flex items-center gap-2">
@@ -214,23 +214,45 @@ export default function VideoPreview({
         </Button>
       </div>
 
-      {/* Video Player */}
-      <div className="flex-1 relative bg-black flex items-center justify-center overflow-hidden">
+      {/* Video Player with gradient background */}
+      <div
+        className="relative flex items-center justify-center overflow-hidden p-6"
+        style={{
+          height: '440px',
+          background: 'linear-gradient(135deg, #1e3a5f 0%, #0f172a 50%, #1e1b4b 100%)',
+        }}
+      >
         {videoUrl ? (
-          <>
-            <video
-              ref={videoRef}
-              src={videoUrl}
-              controls
-              muted={!!voiceoverUrl || isMuted}
-              crossOrigin="anonymous"
-              className="w-full h-full object-contain"
+          <div className="relative w-full h-full flex items-center justify-center">
+            {/* Video container with rounded corners and shadow */}
+            <div
+              className="relative overflow-hidden rounded-xl shadow-2xl"
               style={{
-                transform: `scale(${currentZoom})`,
-                transformOrigin: `${zoomOrigin.x}% ${zoomOrigin.y}%`,
-                transition: 'transform 0.1s ease-out',
+                maxWidth: '100%',
+                maxHeight: '100%',
+                boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.1)',
               }}
-            />
+            >
+              <video
+                ref={videoRef}
+                src={videoUrl}
+                muted={!!voiceoverUrl || isMuted}
+                crossOrigin="anonymous"
+                className="w-full h-full object-contain rounded-xl"
+                style={{
+                  transform: `scale(${currentZoom})`,
+                  transformOrigin: `${zoomOrigin.x}% ${zoomOrigin.y}%`,
+                  transition: 'transform 0.1s ease-out',
+                  maxHeight: '380px',
+                }}
+              />
+              {/* AI Avatar placeholder - only show for original video (not processed) */}
+              {!isProcessedVideo && (
+                <div className="absolute bottom-3 right-3 w-20 h-28 bg-white/10 rounded-lg border border-white/20 flex items-center justify-center pointer-events-none backdrop-blur-sm">
+                  <span className="text-white/50 text-[10px]">AI Avatar</span>
+                </div>
+              )}
+            </div>
             {/* Audio element for voiceover only */}
             {voiceoverUrl && (
               <audio
@@ -241,20 +263,14 @@ export default function VideoPreview({
               />
             )}
             {/* Watermark */}
-            <div className="absolute bottom-4 left-1/2 transform -translate-x-1/2 text-white/50 text-xs pointer-events-none">
+            <div className="absolute bottom-2 left-1/2 transform -translate-x-1/2 text-white/40 text-xs pointer-events-none">
               Made with Trupeer.ai
             </div>
-            {/* AI Avatar placeholder - only show for original video (not processed) */}
-            {!isProcessedVideo && (
-              <div className="absolute bottom-4 right-4 w-24 h-32 bg-white/10 rounded-lg border border-white/20 flex items-center justify-center pointer-events-none">
-                <span className="text-white/50 text-xs">AI Avatar</span>
-              </div>
-            )}
-          </>
+          </div>
         ) : (
-          <div className="text-muted-foreground text-center p-8">
+          <div className="text-white/60 text-center p-8">
             <p className="mb-2">Video preview will appear here</p>
-            <p className="text-sm">Upload or record a video to get started</p>
+            <p className="text-sm text-white/40">Upload or record a video to get started</p>
           </div>
         )}
       </div>

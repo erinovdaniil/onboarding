@@ -55,12 +55,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     if (error) throw error
 
-    // If email confirmation is disabled, user will be logged in immediately
-    if (data.session) {
-      setSession(data.session)
-      setUser(data.user)
-      router.push('/')
-    }
+    // Don't auto-login - require email confirmation
+    // User will need to verify email and then login manually
+    // This prevents new users from seeing other users' projects
   }
 
   const signIn = async (email: string, password: string) => {

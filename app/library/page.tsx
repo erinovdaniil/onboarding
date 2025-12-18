@@ -2,7 +2,7 @@
 
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { Search, Plus, ArrowUpDown } from 'lucide-react'
+import { Search, ArrowUpDown } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import ProjectList from '@/components/ProjectList'
@@ -13,8 +13,8 @@ export default function LibraryPage() {
 
   return (
     <div className="p-8 space-y-6">
-      {/* Header with Search and Actions */}
-      <div className="flex items-center justify-between gap-4">
+      {/* Header with Search */}
+      <div className="flex items-center gap-4">
         <div className="flex-1 max-w-md">
           <div className="relative">
             <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-muted-foreground w-4 h-4" />
@@ -26,10 +26,6 @@ export default function LibraryPage() {
             />
           </div>
         </div>
-        <Button className="bg-primary hover:bg-primary/90 text-primary-foreground gap-2">
-          <Plus className="w-4 h-4" />
-          Create new
-        </Button>
       </div>
 
       {/* Content Header */}

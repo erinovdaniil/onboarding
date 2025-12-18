@@ -29,6 +29,77 @@ logger = logging.getLogger(__name__)
 openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY")) if os.getenv("OPENAI_API_KEY") else None
 
 
+def merge_segments_into_sentences(whisper_segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Merge Whisper's arbitrary segments into natural sentence groups.
+
+    Whisper often breaks text mid-sentence. This function groups segments
+    together until we hit a sentence boundary (. ! ?) or a long pause (>0.5s).
+
+    This ensures each segment contains complete thoughts/sentences.
+    """
+    import re
+
+    if not whisper_segments:
+        return []
+
+    merged_segments = []
+    current_group = []
+    current_start = None
+    current_text_parts = []
+
+    for i, seg in enumerate(whisper_segments):
+        seg_start = seg.get("start", 0)
+        seg_end = seg.get("end", seg_start + 1)
+        seg_text = seg.get("text", "").strip()
+
+        if not seg_text:
+            continue
+
+        # Start new group if empty
+        if current_start is None:
+            current_start = seg_start
+
+        current_group.append(seg)
+        current_text_parts.append(seg_text)
+
+        combined_text = " ".join(current_text_parts)
+
+        # Check if we should end this segment group
+        should_end = False
+
+        # 1. Check for sentence ending (. ! ?)
+        ends_with_sentence = bool(re.search(r'[.!?]$', seg_text))
+
+        # 2. Check for long pause before next segment (> 0.5s)
+        has_long_pause = False
+        if i + 1 < len(whisper_segments):
+            next_start = whisper_segments[i + 1].get("start", seg_end)
+            pause_duration = next_start - seg_end
+            has_long_pause = pause_duration > 0.5
+
+        # End group if we hit a sentence boundary or long pause
+        if ends_with_sentence or has_long_pause:
+            should_end = True
+
+        # Last segment - always end
+        if i == len(whisper_segments) - 1:
+            should_end = True
+
+        if should_end and current_group:
+            merged_segments.append({
+                "id": len(merged_segments),
+                "start": current_start,
+                "end": seg_end,
+                "text": combined_text
+            })
+            current_group = []
+            current_text_parts = []
+            current_start = None
+
+    return merged_segments
+
+
 async def clean_transcript_segments(segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Clean each transcript segment individually using GPT-4.
@@ -60,27 +131,28 @@ async def clean_transcript_segments(segments: List[Dict[str, Any]]) -> List[Dict
         try:
             logger.info(f"Cleaning segment {i+1}/{len(segments)}")
 
-            # Use GPT-4 to ONLY remove filler words - absolutely no other changes
-            # CRITICAL: Do not change any actual words the user said
+            # Use GPT-4 to clean text while preserving meaning and natural speech
             response = openai_client.chat.completions.create(
                 model="gpt-4",
                 messages=[
                     {
                         "role": "system",
                         "content": (
-                            "You are a transcript cleaner. Your ONLY job is to remove filler words.\n\n"
-                            "REMOVE ONLY these exact filler words/phrases:\n"
-                            "- um, uh, er, ah, hmm\n"
-                            "- repeated words like 'I I' or 'the the'\n\n"
+                            "You are a transcript cleaner. Your ONLY job is to remove filler words while keeping everything else exactly the same.\n\n"
+                            "REMOVE these filler words:\n"
+                            "- um, uh, er, ah, hmm, mm\n"
+                            "- like (when used as filler, not comparison)\n"
+                            "- you know, I mean, sort of, kind of (when used as fillers)\n"
+                            "- so (at the start of sentences when used as filler)\n"
+                            "- basically, actually, literally (when not adding meaning)\n\n"
                             "RULES:\n"
-                            "- Do NOT change ANY other words\n"
-                            "- Do NOT fix grammar\n"
-                            "- Do NOT rephrase anything\n"
-                            "- Do NOT add words\n"
-                            "- Do NOT correct what seems like mistakes\n"
-                            "- Keep the EXACT same meaning and wording\n\n"
-                            "If the input has no filler words, return it EXACTLY as-is.\n"
-                            "Output ONLY the text, nothing else."
+                            "- Keep the EXACT same meaning - do not rephrase or rewrite\n"
+                            "- Keep plain, simple English - do not make it sound formal or professional\n"
+                            "- Keep the natural conversational tone\n"
+                            "- Only fix obvious grammar mistakes, not style\n"
+                            "- Do NOT add words or elaborate\n"
+                            "- Do NOT change technical terms\n\n"
+                            "Output ONLY the cleaned text, nothing else."
                         )
                     },
                     {
@@ -89,7 +161,7 @@ async def clean_transcript_segments(segments: List[Dict[str, Any]]) -> List[Dict
                     }
                 ],
                 max_tokens=500,
-                temperature=0.0  # Zero temperature for deterministic output
+                temperature=0.1  # Very low creativity - just clean, don't rewrite
             )
 
             cleaned_text = response.choices[0].message.content.strip()
@@ -139,16 +211,22 @@ async def generate_segmented_voiceover(
     voice: str = "alloy"
 ) -> Optional[str]:
     """
-    Generate voiceover audio segment by segment, matching original timing.
+    Generate voiceover audio that matches original video timing exactly.
 
-    This ensures the voiceover matches the original video duration by:
-    1. Generating TTS for each segment individually
-    2. Adding silence padding after each segment to match original duration
-    3. Concatenating all segments into one audio file
+    Workflow for each segment:
+    1. Original audio 00:00 - 00:03 (3 seconds)
+    2. Transcribe: "Um, so like, click here"
+    3. Clean with AI: "Click here"
+    4. Generate TTS (maybe 1.5s naturally)
+    5. Adjust to EXACTLY match original duration (3 seconds)
+       - If TTS shorter: add silence padding at the end
+       - If TTS longer: speed up (max 1.5x) then pad if needed
+
+    This ensures voiceover syncs perfectly with the original video.
 
     Args:
         project_id: UUID of the project
-        segments: List of cleaned segments with start/end timestamps
+        segments: List of cleaned segments with original start/end timestamps
         voice: OpenAI TTS voice name
 
     Returns:
@@ -159,7 +237,7 @@ async def generate_segmented_voiceover(
     from pathlib import Path
 
     try:
-        logger.info(f"Generating segmented voiceover for project {project_id} with {len(segments)} segments")
+        logger.info(f"Generating time-synced voiceover for project {project_id} with {len(segments)} segments")
 
         if not openai_client:
             raise Exception("OpenAI API key not configured")
@@ -173,6 +251,7 @@ async def generate_segmented_voiceover(
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
             segment_files = []
+            processed_segments = []  # Track segments we actually process
 
             for i, seg in enumerate(segments):
                 cleaned_text = seg.get("cleaned_text", seg.get("text", ""))
@@ -180,12 +259,17 @@ async def generate_segmented_voiceover(
                     logger.warning(f"Segment {i} has no text, skipping")
                     continue
 
-                # Calculate target duration from original timestamps
-                start_time = seg.get("start", 0)
-                end_time = seg.get("end", 0)
-                target_duration = end_time - start_time
+                # Get original timing - this is what we must match
+                original_start = seg.get("start", 0)
+                original_end = seg.get("end", 0)
+                target_duration = original_end - original_start
 
-                logger.info(f"Segment {i+1}/{len(segments)}: {target_duration:.2f}s target, text: '{cleaned_text[:50]}...'")
+                if target_duration <= 0:
+                    logger.warning(f"Segment {i} has invalid duration ({target_duration}s), skipping")
+                    continue
+
+                logger.info(f"Segment {i+1}/{len(segments)}: {original_start:.2f}s - {original_end:.2f}s ({target_duration:.2f}s)")
+                logger.info(f"  Text: '{cleaned_text[:60]}...'")
 
                 # Generate TTS for this segment
                 try:
@@ -205,39 +289,136 @@ async def generate_segmented_voiceover(
 
                 # Get actual TTS duration
                 tts_duration = get_audio_duration(str(raw_file))
-                logger.info(f"Segment {i+1}: TTS duration = {tts_duration:.2f}s, target = {target_duration:.2f}s")
+                logger.info(f"  TTS duration: {tts_duration:.2f}s, target: {target_duration:.2f}s")
 
-                # If TTS is shorter than target, pad with silence
+                # Adjust audio to EXACTLY match target duration
                 final_file = temp_path / f"seg_{i}_final.mp3"
-                if target_duration > 0 and tts_duration < target_duration:
-                    pad_duration = target_duration - tts_duration
-                    logger.info(f"Segment {i+1}: Adding {pad_duration:.2f}s silence padding")
 
-                    # Use ffmpeg to add silence padding at the end
-                    subprocess.run([
+                if abs(tts_duration - target_duration) < 0.1:
+                    # Close enough (within 100ms), use as-is
+                    logger.info(f"  Duration close enough, using as-is")
+                    final_file = raw_file
+
+                elif tts_duration < target_duration:
+                    # TTS is shorter - add silence padding at the end
+                    pad_duration = target_duration - tts_duration
+                    logger.info(f"  Adding {pad_duration:.2f}s silence padding")
+
+                    result = subprocess.run([
                         "ffmpeg", "-i", str(raw_file),
                         "-af", f"apad=pad_dur={pad_duration}",
                         "-y", str(final_file)
                     ], capture_output=True, timeout=30)
 
-                    if final_file.exists():
-                        segment_files.append(str(final_file))
-                    else:
-                        # Fallback to raw file
-                        segment_files.append(str(raw_file))
+                    if result.returncode != 0 or not final_file.exists():
+                        logger.warning(f"  Padding failed, using raw file")
+                        final_file = raw_file
+
                 else:
-                    # TTS is already long enough, use as-is
-                    segment_files.append(str(raw_file))
+                    # TTS is longer - need to speed up
+                    speed_factor = tts_duration / target_duration
+
+                    if speed_factor <= 1.5:
+                        # Speed up is acceptable (max 1.5x)
+                        logger.info(f"  Speeding up by {speed_factor:.2f}x")
+
+                        result = subprocess.run([
+                            "ffmpeg", "-i", str(raw_file),
+                            "-af", f"atempo={speed_factor}",
+                            "-y", str(final_file)
+                        ], capture_output=True, timeout=30)
+
+                        if result.returncode == 0 and final_file.exists():
+                            # Check if we need additional padding after speedup
+                            new_duration = get_audio_duration(str(final_file))
+                            if new_duration < target_duration - 0.1:
+                                pad_duration = target_duration - new_duration
+                                padded_file = temp_path / f"seg_{i}_padded.mp3"
+                                subprocess.run([
+                                    "ffmpeg", "-i", str(final_file),
+                                    "-af", f"apad=pad_dur={pad_duration}",
+                                    "-y", str(padded_file)
+                                ], capture_output=True, timeout=30)
+                                if padded_file.exists():
+                                    final_file = padded_file
+                        else:
+                            logger.warning(f"  Speedup failed, using raw file")
+                            final_file = raw_file
+                    else:
+                        # Speed factor too high - speed up to 1.5x max, then truncate
+                        logger.info(f"  Speed factor {speed_factor:.2f}x too high, using 1.5x and truncating")
+
+                        sped_file = temp_path / f"seg_{i}_sped.mp3"
+                        subprocess.run([
+                            "ffmpeg", "-i", str(raw_file),
+                            "-af", "atempo=1.5",
+                            "-y", str(sped_file)
+                        ], capture_output=True, timeout=30)
+
+                        # Truncate to target duration
+                        if sped_file.exists():
+                            subprocess.run([
+                                "ffmpeg", "-i", str(sped_file),
+                                "-t", str(target_duration),
+                                "-y", str(final_file)
+                            ], capture_output=True, timeout=30)
+
+                        if not final_file.exists():
+                            final_file = raw_file
+
+                # Verify final duration
+                final_duration = get_audio_duration(str(final_file))
+                logger.info(f"  Final segment duration: {final_duration:.2f}s")
+
+                segment_files.append(str(final_file))
+                processed_segments.append({
+                    **seg,
+                    "voiceover_start": original_start,  # Same as original!
+                    "voiceover_end": original_end,
+                })
 
             if not segment_files:
                 raise Exception("No audio segments generated")
 
-            # Concatenate all segments using ffmpeg concat demuxer
+            # Now we need to create the final audio file with correct timing
+            # Add silence between segments if there are gaps in the original timestamps
+
+            # Sort segments by start time
+            processed_segments.sort(key=lambda x: x.get("start", 0))
+
+            # Build final audio with gaps preserved
+            final_audio_parts = []
+            current_time = 0.0
+
+            for i, seg in enumerate(processed_segments):
+                seg_start = seg.get("start", 0)
+                seg_end = seg.get("end", 0)
+
+                # Add silence for gap before this segment
+                gap_before = seg_start - current_time
+                if gap_before > 0.05:  # Only add silence if gap > 50ms
+                    silence_file = temp_path / f"silence_{i}.mp3"
+                    subprocess.run([
+                        "ffmpeg", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
+                        "-t", str(gap_before),
+                        "-c:a", "libmp3lame", "-q:a", "2",
+                        "-y", str(silence_file)
+                    ], capture_output=True, timeout=30)
+                    if silence_file.exists():
+                        final_audio_parts.append(str(silence_file))
+                        logger.info(f"Added {gap_before:.2f}s silence before segment {i+1}")
+
+                # Add the segment audio
+                final_audio_parts.append(segment_files[i])
+                current_time = seg_end
+
+            # Create concat list
             concat_list_file = temp_path / "concat_list.txt"
             with open(concat_list_file, "w") as f:
-                for path in segment_files:
+                for path in final_audio_parts:
                     f.write(f"file '{path}'\n")
 
+            # Concatenate all parts
             output_file = temp_path / "voiceover.mp3"
             concat_result = subprocess.run([
                 "ffmpeg", "-f", "concat", "-safe", "0",
@@ -250,12 +431,20 @@ async def generate_segmented_voiceover(
                 logger.error(f"FFmpeg concat failed: {concat_result.stderr.decode()}")
                 raise Exception("Failed to concatenate audio segments")
 
+            # Save cleaned transcript with timestamps (same as original since we're synced)
+            try:
+                full_cleaned_text = " ".join([seg["cleaned_text"] for seg in processed_segments])
+                await save_cleaned_transcript(project_id, processed_segments, full_cleaned_text)
+                logger.info(f"Saved cleaned_transcripts with synced timestamps")
+            except Exception as e:
+                logger.warning(f"Could not save cleaned_transcripts: {e}")
+
             # Read final audio
             with open(output_file, "rb") as f:
                 audio_content = f.read()
 
-            final_duration = get_audio_duration(str(output_file))
-            logger.info(f"Final voiceover duration: {final_duration:.2f}s")
+            total_duration = get_audio_duration(str(output_file))
+            logger.info(f"Final voiceover duration: {total_duration:.2f}s")
 
             # Upload to Supabase Storage
             storage_path = f"{project_id}/voiceover.mp3"
@@ -269,11 +458,11 @@ async def generate_segmented_voiceover(
             # Save metadata
             await save_video_file(project_id, "audio", storage_path, len(audio_content))
 
-            logger.info(f"Segmented voiceover generated successfully: {audio_url}")
+            logger.info(f"Time-synced voiceover generated successfully: {audio_url}")
             return audio_url
 
     except Exception as e:
-        logger.error(f"Error generating segmented voiceover: {e}", exc_info=True)
+        logger.error(f"Error generating voiceover: {e}", exc_info=True)
         return None
 
 
@@ -797,19 +986,24 @@ async def run_automatic_pipeline(project_id: str, user_id: Optional[str] = None,
 
         # Parse segments from transcript
         import json
-        segments = transcript_record.get("segments", [])
-        if isinstance(segments, str):
-            segments = json.loads(segments)
+        raw_segments = transcript_record.get("segments", [])
+        if isinstance(raw_segments, str):
+            raw_segments = json.loads(raw_segments)
 
-        if not segments:
+        if not raw_segments:
             logger.warning(f"No segments in transcript for project {project_id}")
             # Use full text as single segment
-            segments = [{
+            raw_segments = [{
                 "id": 0,
                 "start": 0.0,
                 "end": 0.0,
                 "text": transcript_record.get("text", "")
             }]
+
+        # Merge Whisper segments into natural sentence groups
+        # This prevents breaking sentences in the middle
+        segments = merge_segments_into_sentences(raw_segments)
+        logger.info(f"Merged {len(raw_segments)} raw segments into {len(segments)} sentence groups")
 
         # ============================================================
         # STAGE 1: Clean Transcript
