@@ -4,10 +4,10 @@ const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:8000'
 
 export async function GET(
   request: NextRequest,
-  { params }: { params: { projectId: string } }
+  { params }: { params: Promise<{ projectId: string }> }
 ) {
   try {
-    const { projectId } = params
+    const { projectId } = await params
     
     // Forward the request to Python backend
     const response = await fetch(`${BACKEND_URL}/api/video/export/${projectId}`, {

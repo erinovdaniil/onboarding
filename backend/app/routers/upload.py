@@ -94,31 +94,43 @@ async def extract_audio(video_path: Path, audio_path: Path) -> bool:
 async def transcribe_audio(audio_path: Path) -> Optional[dict]:
     """
     Transcribe audio using OpenAI Whisper API.
-    Returns transcript with word-level timestamps for precise voiceover sync.
+
+    Uses whisper-1 model which provides:
+    - Reliable transcription quality
+    - Word-level timestamps for precise voiceover sync
+    - Segment-level timestamps as fallback
+
+    Note: gpt-4o-transcribe was tested but caused quality regressions
+    (hallucinations, repeated text, wrong timestamps). Sticking with whisper-1.
     """
     if not openai_client:
         return None
 
     try:
+        # Use whisper-1 with improved prompt for word-level timestamps
+        logger.info("Transcribing with whisper-1...")
         with open(audio_path, "rb") as audio_file:
-            transcript = openai_client.audio.transcriptions.create(
+            whisper_transcript = openai_client.audio.transcriptions.create(
                 model="whisper-1",
                 file=audio_file,
                 response_format="verbose_json",
-                timestamp_granularities=["word", "segment"]  # Get both word and segment level
+                timestamp_granularities=["word", "segment"],
+                # Prompt helps guide transcription context
+                prompt="This is a screen recording tutorial demonstrating software features. Transcribe the narration accurately."
             )
 
         # Convert to dict format
         transcript_data = {
-            "text": transcript.text,
-            "language": getattr(transcript, "language", "en"),
+            "text": whisper_transcript.text,
+            "language": getattr(whisper_transcript, "language", "en"),
             "segments": [],
-            "words": []  # Store word-level timestamps for precise sync
+            "words": [],
+            "model_used": "whisper-1"
         }
 
         # Extract word-level timestamps (more precise for voiceover sync)
-        if hasattr(transcript, "words") and transcript.words:
-            for word in transcript.words:
+        if hasattr(whisper_transcript, "words") and whisper_transcript.words:
+            for word in whisper_transcript.words:
                 transcript_data["words"].append({
                     "word": word.word,
                     "start": word.start,
@@ -127,8 +139,8 @@ async def transcribe_audio(audio_path: Path) -> Optional[dict]:
             logger.info(f"Got {len(transcript_data['words'])} word-level timestamps")
 
         # Extract segments as fallback
-        if hasattr(transcript, "segments") and transcript.segments:
-            for segment in transcript.segments:
+        if hasattr(whisper_transcript, "segments") and whisper_transcript.segments:
+            for segment in whisper_transcript.segments:
                 transcript_data["segments"].append({
                     "id": segment.id,
                     "start": segment.start,
@@ -139,7 +151,7 @@ async def transcribe_audio(audio_path: Path) -> Optional[dict]:
 
         return transcript_data
     except Exception as e:
-        print(f"Transcription error: {e}")
+        logger.error(f"Transcription error: {e}")
         return None
 
 

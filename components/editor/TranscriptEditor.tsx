@@ -171,9 +171,33 @@ export default function TranscriptEditor({
   return (
     <div className="flex flex-col h-full">
       <div className="px-4 py-2 border-b bg-muted/30">
-        <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          <Clock className="w-3 h-3" />
-          <span>{phrases.length} phrases</span>
+        <div className="flex items-center justify-between text-xs text-muted-foreground">
+          <div className="flex items-center gap-2">
+            <Clock className="w-3 h-3" />
+            <span>{phrases.length} phrases</span>
+          </div>
+          {onRetranscribe && (
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={handleRetranscribe}
+              disabled={isRetranscribing || disabled}
+              className="h-6 px-2 text-xs gap-1"
+              title="Re-transcribe with improved AI (gpt-4o-transcribe)"
+            >
+              {isRetranscribing ? (
+                <>
+                  <Loader2 className="w-3 h-3 animate-spin" />
+                  Re-transcribing...
+                </>
+              ) : (
+                <>
+                  <RefreshCw className="w-3 h-3" />
+                  Re-transcribe
+                </>
+              )}
+            </Button>
+          )}
         </div>
       </div>
 

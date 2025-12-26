@@ -330,26 +330,31 @@ async def retranscribe_video(request: RetranscribeRequest):
             if result.returncode != 0:
                 raise HTTPException(status_code=500, detail="Failed to extract audio")
 
-            # Transcribe with word-level timestamps
+            # Use whisper-1 with improved prompt for word-level timestamps
+            # Note: gpt-4o-transcribe doesn't support word timestamps and can hallucinate
+            logger.info("Transcribing with whisper-1 (with improved prompt)...")
             with open(audio_path, "rb") as audio_file:
-                transcript = openai_client.audio.transcriptions.create(
+                whisper_transcript = openai_client.audio.transcriptions.create(
                     model="whisper-1",
                     file=audio_file,
                     response_format="verbose_json",
-                    timestamp_granularities=["word", "segment"]
+                    timestamp_granularities=["word", "segment"],
+                    # Prompt helps whisper understand context and reduces errors
+                    prompt="This is a screen recording tutorial demonstrating software features. The speaker describes clicks, navigation, zooming, and document management."
                 )
 
             # Build transcript data
             transcript_data = {
-                "text": transcript.text,
-                "language": getattr(transcript, "language", "en"),
+                "text": whisper_transcript.text,
+                "language": getattr(whisper_transcript, "language", "en"),
                 "segments": [],
-                "words": []
+                "words": [],
+                "model_used": "whisper-1"
             }
 
-            # Extract word-level timestamps
-            if hasattr(transcript, "words") and transcript.words:
-                for word in transcript.words:
+            # Extract word-level timestamps from whisper
+            if hasattr(whisper_transcript, "words") and whisper_transcript.words:
+                for word in whisper_transcript.words:
                     transcript_data["words"].append({
                         "word": word.word,
                         "start": word.start,
@@ -357,9 +362,9 @@ async def retranscribe_video(request: RetranscribeRequest):
                     })
                 logger.info(f"Got {len(transcript_data['words'])} word-level timestamps")
 
-            # Extract segments
-            if hasattr(transcript, "segments") and transcript.segments:
-                for segment in transcript.segments:
+            # Extract segments from whisper
+            if hasattr(whisper_transcript, "segments") and whisper_transcript.segments:
+                for segment in whisper_transcript.segments:
                     transcript_data["segments"].append({
                         "id": segment.id,
                         "start": segment.start,

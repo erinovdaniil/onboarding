@@ -4,12 +4,12 @@ const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:8000'
 
 export async function GET(
   request: NextRequest,
-  { params }: { params: { projectId: string } }
+  { params }: { params: Promise<{ projectId: string }> }
 ) {
-  try {
-    const { projectId } = params
-    const authorization = request.headers.get('authorization')
+  const { projectId } = await params
+  const authorization = request.headers.get('authorization')
 
+  try {
     // Forward the request to Python backend
     const response = await fetch(`${BACKEND_URL}/api/projects/${projectId}`, {
       method: 'GET',
@@ -21,11 +21,11 @@ export async function GET(
       const projectsResponse = await fetch(`${BACKEND_URL}/api/projects/`)
       const projectsData = await projectsResponse.json()
       const project = projectsData.projects?.find((p: any) => p.id === projectId)
-      
+
       if (project) {
         return NextResponse.json(project)
       }
-      
+
       return NextResponse.json(
         { error: 'Project not found' },
         { status: 404 }
@@ -40,15 +40,15 @@ export async function GET(
     try {
       const projectsResponse = await fetch(`${BACKEND_URL}/api/projects/`)
       const projectsData = await projectsResponse.json()
-      const project = projectsData.projects?.find((p: any) => p.id === params.projectId)
-      
+      const project = projectsData.projects?.find((p: any) => p.id === projectId)
+
       if (project) {
         return NextResponse.json(project)
       }
     } catch (fallbackError) {
       console.error('Fallback error:', fallbackError)
     }
-    
+
     return NextResponse.json(
       { error: 'Failed to fetch project' },
       { status: 500 }
@@ -58,10 +58,10 @@ export async function GET(
 
 export async function PATCH(
   request: NextRequest,
-  { params }: { params: { projectId: string } }
+  { params }: { params: Promise<{ projectId: string }> }
 ) {
   try {
-    const { projectId } = params
+    const { projectId } = await params
     const authorization = request.headers.get('authorization')
     const body = await request.json()
 
@@ -96,10 +96,10 @@ export async function PATCH(
 
 export async function DELETE(
   request: NextRequest,
-  { params }: { params: { projectId: string } }
+  { params }: { params: Promise<{ projectId: string }> }
 ) {
   try {
-    const { projectId } = params
+    const { projectId } = await params
     const authorization = request.headers.get('authorization')
 
     // Forward the request to Python backend

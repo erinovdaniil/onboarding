@@ -45,7 +45,9 @@ export default function EditorPage() {
   const isSeekingRef = useRef(false) // Track if user is manually seeking
 
   useEffect(() => {
-    fetchProject()
+    if (projectId && projectId !== 'undefined') {
+      fetchProject()
+    }
   }, [projectId])
 
   useEffect(() => {
